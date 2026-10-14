@@ -101,7 +101,7 @@ Before you ask anything, write the expected answers. Do this for every PR.
 ### Grade
 
 1. When the user answers, read the rubric. Grade each answer as right, partial or missed. Grade only against the rubric.
-2. Give the file:line evidence from the rubric for each grade.
+2. For each question, write its number, its grade and one file:line from the rubric. A right answer needs a file:line too.
 3. A right answer is 1 point, a partial answer is 0.5, and a missed answer is 0. Round the total down.
 4. Grade a skipped question as missed.
 
@@ -120,7 +120,7 @@ AI-written code can look right and hide faults. After you grade, read the whole 
 9. A hardcoded value or a secret.
 10. Input that crosses a trust boundary without a check.
 
-Report each finding with file:line. Mark it as a blocker or a note. A blocker can break behavior, leak a secret, hide a failure or let bad input in. If the diff has no finding, say "none found".
+Report each finding with file:line. A note needs a file:line too. Mark each finding as a blocker or a note. A blocker can break behavior, leak a secret, hide a failure or let bad input in. If the diff has no finding, say "none found".
 
 ### Close someone else's PR
 
