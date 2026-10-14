@@ -408,6 +408,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status", help="level, streak, counts, achievements and today's quests")
     sub.add_parser("selftest", help="check the pure functions")
+    sub.add_parser("dir", help="print the data folder (QUESTLOG_DIR or ~/.claude/questlog)")
     r = sub.add_parser("recap", help="brag-doc recap in Markdown")
     r.add_argument("--days", type=int, default=7)
     c = sub.add_parser("chart", help="write chart.html: heatmap, cumulative XP and weekly bars")
@@ -422,7 +423,8 @@ def main():
     lg.add_argument("--text")
     lg.add_argument("--own", action="store_true", help="the check is for your own PR")
     a = ap.parse_args()
-    {"status": cmd_status, "recap": cmd_recap, "chart": cmd_chart, "log": cmd_log, "selftest": selftest}[a.cmd](a)
+    {"status": cmd_status, "recap": cmd_recap, "chart": cmd_chart, "log": cmd_log, "selftest": selftest,
+     "dir": lambda _: print(datadir())}[a.cmd](a)
 
 if __name__ == "__main__":
     main()
