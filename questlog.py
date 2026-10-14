@@ -2,7 +2,7 @@
 """questlog: score your engineering work. GitHub data comes from `gh`. Stdlib only, Python 3.9+."""
 from __future__ import annotations
 
-import argparse, json, math, os, re, subprocess, sys  # noqa: E401
+import argparse, base64, http.client, json, math, os, re, subprocess, sys, urllib.error, urllib.parse, urllib.request  # noqa: E401
 from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -221,6 +221,103 @@ def collect(who, start):
     return mark_owned([merged_event(n) for n in merged if n.get("mergedAt")]
                       + [e for n in seen for e in review_event(n, start)] + read_local(datadir() / "log.jsonl"))
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kw):    # a redirect would carry the token to another place
+        return None
+
+def http_get(url, auth):
+    """GET a URL and return the body as text. The only code that talks to Jira. It never writes."""
+    hdr = {"Accept": "application/json", **({"Authorization": auth} if auth else {})}
+    with urllib.request.build_opener(NoRedirect).open(urllib.request.Request(url, headers=hdr, method="GET"), timeout=20) as r:
+        return r.read().decode("utf-8", "replace")
+
+def jira_base(url):
+    """The base URL without a trailing slash, or "" if unset. The token goes only over HTTPS, so any other scheme dies."""
+    base = (url or "").strip().rstrip("/")
+    if base and not base.startswith("https://"):
+        die("QUESTLOG_JIRA_URL must start with https://")
+    return base
+
+def basic_auth(meta, token):
+    """The Authorization value from the attribute list of `security` and the token, or None."""
+    m = re.search(r'^\s*"acct"<blob>="(.*)"\s*$', meta, re.M)
+    return "Basic " + base64.b64encode(f"{m[1]}:{token}".encode()).decode() if m and token else None
+
+def jira_auth():
+    """Basic auth from the Keychain item questlog-jira, or None for no auth. The token stays in memory."""
+    def sec(*flag):
+        return subprocess.run(["security", "find-generic-password", "-s", "questlog-jira", *flag],
+                              capture_output=True, encoding="utf-8", errors="replace")
+    try:
+        meta, tok = sec(), sec("-w")
+    except OSError:
+        return None
+    return None if meta.returncode or tok.returncode else basic_auth(meta.stdout, tok.stdout.strip())
+
+def jira_issue(i):
+    """One issue as key, summary and status category (new, indeterminate or done)."""
+    f = i["fields"]
+    return {"key": clean(i["key"]), "summary": clean(f["summary"]), "status": clean(f["status"]["statusCategory"]["key"])}
+
+def key_order(k):
+    proj, _, num = k.rpartition("-")
+    return proj, int(num)
+
+def jira_pull(base, epic, auth, get):
+    """(the epic issue or None, its child issues by project and number). One GET for each page, 50 pages at most."""
+    raw, tok = [], None
+    for _ in range(50):
+        q = {"jql": f"key = {epic} OR parent = {epic}", "fields": "summary,status", "maxResults": 100}
+        if tok:
+            q["nextPageToken"] = tok
+        page = json.loads(get(f"{base}/rest/api/3/search/jql?" + urllib.parse.urlencode(q), auth))
+        raw += page["issues"]
+        if page["isLast"]:
+            break
+        tok = page["nextPageToken"]
+    else:
+        raise ValueError("more than 50 pages")
+    rows = [jira_issue(i) for i in raw]
+    kids = sorted((r for r in rows if r["key"] != epic), key=lambda r: key_order(r["key"]))
+    return next((r for r in rows if r["key"] == epic), None), kids
+
+def jira_cache(path, epic):
+    """The saved jira.json as a dict, or None if it is missing or does not look right."""
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+        date.fromisoformat(d["started"])
+        ok = d["epic"] == epic and all(k in d for k in ("summary", "read_at")) and all(set(i) >= {"key", "summary", "status"} for i in d["issues"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return d if ok else None
+
+def jira_load(path, epic, base, auth, get=http_get):
+    """(data, from_cache). Read Jira and save it to `path`. If the read fails, say why and use the saved file."""
+    old, why = jira_cache(path, epic), "QUESTLOG_JIRA_URL is not set, so questlog did not read Jira."
+    if base:
+        try:
+            top, kids = jira_pull(base, epic, auth, get)
+            why = None
+        except urllib.error.HTTPError as e:
+            why = (f"Jira refused the request (HTTP {e.code}). The token is missing, wrong or expired." if e.code in (401, 403)
+                   else f"Jira answered HTTP {e.code}.")
+        except OSError as e:
+            why = f"Jira could not be reached ({getattr(e, 'reason', e)})."
+        except (ValueError, KeyError, TypeError, http.client.HTTPException) as e:
+            why = f"Jira sent an answer that questlog cannot read ({str(e) or type(e).__name__})."
+    if why:
+        if not old:
+            die(f"{clean(why)} There is no saved copy of {epic} to use instead.")
+        print("questlog: " + clean(why), file=sys.stderr)
+        return old, True
+    if not top:
+        die(f"{epic} is not in Jira, or this account cannot see it.")
+    data = {"epic": epic, "summary": top["summary"], "started": old["started"] if old else date.today().isoformat(),
+            "read_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "issues": kids}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    return data, False
+
 def cmd_log(a):
     today = date.today()
     try:
@@ -437,6 +534,58 @@ def selftest(_=None):
     assert [epic_key(x) for x in ("abc-1", "ABC_D-12")] == ["ABC-1", "ABC_D-12"]
     assert all(dies(epic_key, x) for x in ("ABC-1 OR project = X", "ABC-1\n", "", "ABC", "A-1", "ÄBC-1", None))
     assert clean("a\x1b[31mb\x07\x7f\x85c\ud800") == "a[31mbc"
+    assert jira_base(None) == "" and jira_base(" https://acme.atlassian.net/ ") == "https://acme.atlassian.net"
+    assert all(dies(jira_base, x) for x in ("http://acme.atlassian.net", "ftp://x", "acme.atlassian.net", "https://"))
+    meta = 'attributes:\n    0x00000007 <blob>="questlog-jira"\n    "acct"<blob>="me@example.com"\n    "cdat"<timedate>=0x3230\n'
+    assert basic_auth(meta, "tok") == "Basic " + base64.b64encode(b"me@example.com:tok").decode()
+    assert basic_auth(meta, "") is None and basic_auth("attributes:\n", "tok") is None
+
+    def issue(key, st="new"):
+        return {"key": key, "fields": {"summary": "Issue " + key, "status": {"statusCategory": {"key": st}}}}
+    pages = {None: {"issues": [issue("ABC-10"), issue("ABC-1"), issue("XYZ-3")], "isLast": False, "nextPageToken": "t2"},
+             "t2": {"issues": [issue("ABC-2", "done"), issue("ABC-9")], "isLast": True}}
+    urls = []
+
+    def get_page(url, auth):                                   # two pages, like Jira
+        urls.append(url)
+        return json.dumps(pages[urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("nextPageToken", [None])[0]])
+    top, kids = jira_pull("https://acme.example", "ABC-1", None, get_page)
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(urls[0]).query)
+    assert top["key"] == "ABC-1" and [k["key"] for k in kids] == ["ABC-2", "ABC-9", "ABC-10", "XYZ-3"] and kids[0]["status"] == "done"
+    assert len(urls) == 2 and urls[0].startswith("https://acme.example/rest/api/3/search/jql?")
+    assert q == {"jql": ["key = ABC-1 OR parent = ABC-1"], "fields": ["summary,status"], "maxResults": ["100"]}
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "c" / "jira.json"
+
+        def fails(exc):
+            def get(url, auth):
+                raise exc
+            return get
+
+        def http_err(code):
+            return fails(urllib.error.HTTPError("u", code, "x", {}, None))
+
+        def no_epic(url, auth):
+            return json.dumps({"issues": [issue("ABC-2")], "isLast": True})
+        assert dies(jira_load, path, "ABC-1", "https://acme.example", None, http_err(401))      # no saved copy yet
+        d, cached = jira_load(path, "ABC-1", "https://acme.example", None, get_page)
+        assert not cached and d["started"] == date.today().isoformat() and len(d["issues"]) == 4
+        path.write_text(json.dumps(dict(d, started="2026-09-01")))
+        assert jira_load(path, "ABC-1", "https://acme.example", None, get_page)[0]["started"] == "2026-09-01"
+        for get, msg in ((http_err(401), "Jira refused the request (HTTP 401). The token is missing, wrong or expired."),
+                         (http_err(403), "Jira refused the request (HTTP 403)."), (http_err(500), "Jira answered HTTP 500."),
+                         (fails(urllib.error.URLError("no route")), "Jira could not be reached (no route)."),
+                         (fails(TimeoutError("timed out")), "could not be reached (timed out)"), (lambda url, auth: "<html>", "cannot read"),
+                         (fails(http.client.IncompleteRead(b"")), "cannot read (IncompleteRead")):
+            with contextlib.redirect_stderr(io.StringIO()) as err:                             # the saved copy is used
+                d2, cached = jira_load(path, "ABC-1", "https://acme.example", None, get)
+            assert cached and d2["issues"] == d["issues"] and msg in err.getvalue(), (msg, err.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            assert jira_load(path, "ABC-1", "", None)[1] and "QUESTLOG_JIRA_URL" in err.getvalue()
+        assert dies(jira_load, path, "ABC-1", "https://acme.example", None, no_epic)             # the saved copy stays
+        assert jira_cache(path, "ABC-1")["started"] == "2026-09-01" and jira_cache(path, "ABC-2") is None
     print("ok")
 
 def main():
