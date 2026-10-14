@@ -346,6 +346,20 @@ def plan_errors(plan, jira, path):
             errs.append(p + f"trap {n} needs an area and a risk")
     return errs
 
+def plan_load(path, jira):
+    """(plan, errors) for a plan.json. A missing file gives (None, [])."""
+    if not path.exists():
+        return None, []
+    try:
+        plan = json.loads(path.read_text(encoding="utf-8"))
+        return plan, plan_errors(plan, jira, path)
+    except (OSError, ValueError) as e:
+        return None, [f"{path}: cannot read the file ({e})"]
+
+def chapter_todo(chapter, iss):
+    """The issues of a chapter that are not done. A chapter with none is done."""
+    return [k for k in chapter["issues"] if iss[k]["status"] != "done"]
+
 def campaign_report(jira, cached, plan, prs, today):
     """The campaign report as lines. `plan` is None for no plan. `prs` holds the key set of each merged PR of the season."""
     iss = {i["key"]: i for i in jira["issues"]}
@@ -359,11 +373,32 @@ def campaign_report(jira, cached, plan, prs, today):
     names = [clean(c["name"]) for c in plan["chapters"]]
     w, placed = max(map(len, names)), {k for c in plan["chapters"] for k in c["issues"]}
     for n, (c, name) in enumerate(zip(plan["chapters"], names), 1):
-        todo, npr = [k for k in c["issues"] if iss[k]["status"] != "done"], sum(bool(set(c["issues"]) & x) for x in prs)
+        todo, npr = chapter_todo(c, iss), sum(bool(set(c["issues"]) & x) for x in prs)
         out.append(f"Chapter {n} {name:<{w}}   {'open' if todo else 'done'}  {len(c['issues']) - len(todo)}/{len(c['issues'])} issues"
                    f"  {npr} PR{'s' * (npr != 1)}")
         out += [row(k) for k in todo]
     return out + (["Unplaced"] + [row(k) for k in iss if k not in placed] if set(iss) - placed else [])
+
+def campaign_line(epic, jira, plan, errs):
+    """The line that `status` prints for the active campaign. `jira` and `plan` are None when the file is missing."""
+    head = f"Campaign {epic}: "
+    if not jira:
+        return head + "no Jira read yet"
+    if not plan or errs:
+        return head + "no plan yet"
+    iss = {i["key"]: i for i in jira["issues"]}
+    n = next((k for k, c in enumerate(plan["chapters"], 1) if chapter_todo(c, iss)), 0)
+    return head + (f"chapter {n} of {len(plan['chapters'])}" if n else "complete")
+
+def status_campaign(old):
+    """[the campaign line] for `status`, or [] with no active campaign. It reads the saved files and makes no Jira call."""
+    epic = old.get("campaign")
+    if not (isinstance(epic, str) and KEY_RE.fullmatch(epic)):
+        return []
+    cdir = datadir() / "campaigns" / epic
+    jira = jira_cache(cdir / "jira.json", epic)
+    plan, errs = plan_load(cdir / "plan.json", jira) if jira else (None, [])
+    return [campaign_line(epic, jira, plan, errs)]
 
 def cmd_campaign(a):
     today, st = date.today(), load_state()
@@ -377,13 +412,7 @@ def cmd_campaign(a):
     jira, cached = jira_load(cdir / "jira.json", epic, base, auth)
     if a.epic is not None:
         (datadir() / "state.json").write_text(json.dumps({**st, "campaign": epic}))
-    plan, errs, pp = None, [], cdir / "plan.json"
-    if pp.exists():
-        try:
-            plan = json.loads(pp.read_text(encoding="utf-8"))
-            errs = plan_errors(plan, jira, pp)
-        except (OSError, ValueError) as e:
-            errs = [f"{pp}: cannot read the file ({e})"]
+    plan, errs = plan_load(cdir / "plan.json", jira)
     s0, known = season_bounds(today)[0], {i["key"] for i in jira["issues"]} | {epic}
     prs = [pr_keys(e["title"], e["branch"], known) for e in collect(whoami(), s0) if e["kind"] == "merged" and ev_in(e, s0, today)]
     if errs:
@@ -448,7 +477,7 @@ def cmd_status(_):
         return [f"{t['merged']} ({t['clean']} clean, {t['tested']} tested, owned {t['owned']})",
                 t["review"], t["card"], t["check"], t["areas"]]
     out += [f"QUESTLOG {label} | day {(today - s0).days + 1} of {(s1 - s0).days + 1}",
-            f"Level {lv} {title(lv)} | {xp} XP | {to_next(xp)} XP to level {lv + 1}",
+            f"Level {lv} {title(lv)} | {xp} XP | {to_next(xp)} XP to level {lv + 1}", *status_campaign(old),
             f"Workday streak: {cur} (best this season: {best})",
             "XP per week: " + spark([w["xp"] for w in weekly(season, s0, today)]),
             "Last 10 workdays: " + recent(active, off, s0, today), f"{'':9}{'season':<34}this week"]
@@ -692,6 +721,17 @@ def selftest(_=None):
     assert r[0].endswith("09:02 (cache)") and r[1] == "No plan yet. Issues:" and r[2] == "  ABC-2 done  Add the gate" and len(r) == 7
     plan["chapters"].append({"name": "The Rest", "issues": ["ABC-6"]})
     assert "Unplaced" not in campaign_report(jira, False, plan, [], D(2026, 10, 14))
+    line, done = "Campaign ABC-1: ", dict(jira, issues=[dict(i, status="done") for i in jira["issues"]])
+    assert campaign_line("ABC-1", None, None, []) == line + "no Jira read yet"
+    assert campaign_line("ABC-1", jira, None, []) == campaign_line("ABC-1", jira, plan, ["plan.json: bad"]) == line + "no plan yet"
+    assert campaign_line("ABC-1", jira, plan, []) == line + "chapter 2 of 3" and campaign_line("ABC-1", done, plan, []) == line + "complete"
+    with tempfile.TemporaryDirectory() as td:                                              # plan_load: none, broken, good
+        pp = Path(td) / "plan.json"
+        assert plan_load(pp, jira) == (None, [])
+        pp.write_text("{")
+        assert plan_load(pp, jira)[0] is None and "plan.json: cannot read the file" in plan_load(pp, jira)[1][0]
+        pp.write_text(json.dumps(plan))
+        assert plan_load(pp, jira) == (plan, [])
     print("ok")
 
 def main():
