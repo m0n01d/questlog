@@ -25,10 +25,10 @@ ACHIEVEMENTS = [                      # (name, what it counts, goal)
     ("Scholar", "card", 15), ("Deep Diver", "perfect", 5), ("Cartographer", "areas", 25), ("Iron Streak", "best", 10)]
 GQL = ("query($q:String!,$type:SearchType!,$after:String){search(query:$q,type:$type,first:100,after:$after)"
        "{pageInfo{hasNextPage endCursor}nodes{...on PullRequest{%s}}}}")
+WARNED = []                           # warn once about partial GitHub errors
 PR = "number title url repository{nameWithOwner} "
 FILES = "additions deletions changedFiles files(first:100){nodes{path additions deletions}}"
 
-# ---- Pure functions -----------------------------------------------------------------------------
 def level(xp): return 1 + math.isqrt(xp // XP_PER_STEP)
 def title(lv): return TITLES[max(k for k in TITLES if k <= lv)]
 def to_next(xp): return XP_PER_STEP * level(xp) ** 2 - xp
@@ -88,7 +88,6 @@ def tally(evs):
     t["areas"] = len(seen)
     return t
 
-# ---- Local files --------------------------------------------------------------------------------
 def datadir():
     d = Path(os.environ.get("QUESTLOG_DIR") or "~/.claude/questlog").expanduser()
     d.mkdir(parents=True, exist_ok=True)
@@ -111,7 +110,6 @@ def load_state():
     except (OSError, ValueError):
         return {}
 
-# ---- GitHub -------------------------------------------------------------------------------------
 def die(msg):
     print("questlog: " + msg, file=sys.stderr)
     sys.exit(1)
@@ -141,7 +139,8 @@ def search(q, fields, run=gh):
                 typ = "ISSUE_ADVANCED"
                 continue
             die("GitHub search failed: " + ((r.stderr or r.stdout).strip().splitlines() or ["no detail"])[0])
-        if r.returncode:
+        if r.returncode and not WARNED:
+            WARNED.append(1)
             print("questlog: warning: GitHub reported errors, so some results may be missing", file=sys.stderr)
         out += [n for n in s["nodes"] if n]
         if not s["pageInfo"]["hasNextPage"]:
@@ -157,7 +156,6 @@ def collect(who, start):
     return ([merged_event(n) for n in merged if n.get("mergedAt")]
             + [e for n in seen for e in review_event(n, start)] + read_local(datadir() / "log.jsonl"))
 
-# ---- Commands -----------------------------------------------------------------------------------
 def cmd_log(a):
     today = date.today()
     try:
@@ -207,8 +205,8 @@ def cmd_status(_):
         return [f"{t['merged']} ({t['clean']} clean, {t['tested']} tested)", t["review"], t["card"], t["check"], t["areas"]]
     out += [f"QUESTLOG {label} | day {(today - s0).days + 1} of {(s1 - s0).days + 1}",
             f"Level {lv} {title(lv)} | {xp} XP | {to_next(xp)} XP to level {lv + 1}",
-            f"Workday streak: {cur} (best this season: {best})", f"{'':9}{'season':<25}this week"]
-    out += [f"{n:<9}{x!s:<25}{y}" for n, x, y in zip(("Merged", "Reviews", "Cards", "Checks", "Areas"), cells(ts), cells(tw))]
+            f"Workday streak: {cur} (best this season: {best})", f"{'':9}{'season':<28}this week"]
+    out += [f"{n:<9}{x!s:<28}{y}" for n, x, y in zip(("Merged", "Reviews", "Cards", "Checks", "Areas"), cells(ts), cells(tw))]
     out += ["Achievements"] + [f"[{'x' if n in have else ' '}] {n:<20} {min(ts[k], g)}/{g}" for n, k, g in ACHIEVEMENTS]
     others = [q for q, k in (("Ship one clean slice", "merged"), ("Write one learning card", "card"))
               if not any(e["kind"] == k and today in e["days"] for e in evs)]
@@ -225,16 +223,16 @@ def cmd_recap(a):
     win, season_xp = [e for e in evs if ev_in(e, lo, today)], tally([e for e in evs if ev_in(e, s0, today)])["xp"]
     t, lv = tally(win), level(season_xp)
 
-    def pick(kind, fmt):
-        return [fmt(e) for e in win if e["kind"] == kind] or ["- none"]
+    def sec(head, kind, fmt):
+        return ["", "## " + head] + ([fmt(e) for e in win if e["kind"] == kind] or ["- none"])
 
     def link(e):
         return "[%s](%s)" % (re.sub(r"([\[\]])", r"\\\1", e["title"]), e["url"])
     print("\n".join(
-        [f"# Questlog recap: {lo} to {today}", "", "## Shipped"]
-        + pick("merged", lambda e: f"- {link(e)} ({e['repo']}, {e['lines']} lines{', tested' if e['tested'] else ''})")
-        + ["", "## Reviewed"] + pick("review", lambda e: f"- {link(e)} ({e['repo']})")
-        + ["", "## Learned"] + pick("card", lambda e: f"- {e['text']}" + (f" ({e['pr']})" if e.get("pr") else ""))
+        [f"# Questlog recap: {lo} to {today}"]
+        + sec("Shipped", "merged", lambda e: f"- {link(e)} ({e['repo']}, {e['lines']} lines{', tested' if e['tested'] else ''})")
+        + sec("Reviewed", "review", lambda e: f"- {link(e)} ({e['repo']})")
+        + sec("Learned", "card", lambda e: f"- {e['text']}" + (f" ({e['pr']})" if e.get("pr") else ""))
         + ["", "## Numbers",
            f"- {t['merged']} PRs merged ({t['clean']} clean slices, {t['tested']} with tests), "
            f"{t['review']} PRs reviewed, {t['card']} cards, {t['check']} checks",
@@ -313,8 +311,6 @@ def main():
     lg.add_argument("--date", help="YYYY-MM-DD, default today")
     lg.add_argument("--text")
     a = ap.parse_args()
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(errors="replace")
     {"status": cmd_status, "recap": cmd_recap, "log": cmd_log, "selftest": selftest}[a.cmd](a)
 
 if __name__ == "__main__":
