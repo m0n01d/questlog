@@ -296,6 +296,34 @@ def cmd_recap(a):
            f"{t['review']} PRs reviewed, {t['card']} cards, {t['check']} checks",
            f"- {t['xp']} XP in this window. Level now: {lv} {title(lv)} ({season_xp} XP this season)"]))
 
+def chart_html(evs, today, demo=False):
+    """The chart page for a season. It holds dates and numbers only."""
+    import chart
+    s0, s1 = season_bounds(today)
+    season = [e for e in evs if ev_in(e, s0, today)]
+    days, xp = Counter(), tally(season)["xp"]
+    for e in season:
+        days[min(e["days"])] += e["xp"]
+    head = f"{s0.year}-Q{(s0.month - 1) // 3 + 1} · Level {level(xp)} {title(level(xp))} · {xp} XP" + (" · demo data" if demo else "")
+    return chart.page(head, s0, s1, today, days, weekly(season, s0, today), {d for e in evs if e["kind"] == "off" for d in e["days"]},
+                      [(XP_PER_STEP * (k - 1) ** 2, k) for k in range(2, 12)])
+
+def cmd_chart(a):
+    today = date.today()
+    if a.demo:
+        import chart
+        evs, today = chart.demo()
+    else:
+        evs = collect(whoami(), season_bounds(today)[0])
+    path = datadir() / "chart.html"
+    path.write_text(chart_html(evs, today, a.demo), encoding="utf-8")
+    print(f"Wrote {path}")
+    if not a.no_open:
+        try:
+            subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", str(path)])
+        except OSError:
+            print("questlog: could not open a browser. Open the file by hand.", file=sys.stderr)
+
 def selftest(_=None):
     D = date
     assert [level(x) for x in (0, 24, 25, 99, 100, 2500)] == [1, 1, 2, 2, 3, 11]
@@ -358,6 +386,10 @@ def selftest(_=None):
     m3 = mark_owned([merged_event(pr([("src/a.py", 20, 0)])), dict(full, own=False)])[0]   # not an own check
     assert not m3.get("owned") and tally([m1, m2, m3])["owned"] == 1
 
+    import chart
+    for h in (chart_html([merged_event(pr([("src/a.py", 30, 10)]))], D(2026, 10, 14)), chart_html(*chart.demo(), True)):
+        assert "<polyline" in h and not any(x in h for x in ("<script", "http", "src=", "url(", "acme", "login")), "chart: dates and numbers only"
+
     seen = []
 
     def fake(*args):                                                       # ISSUE is rejected, two pages follow
@@ -378,6 +410,9 @@ def main():
     sub.add_parser("selftest", help="check the pure functions")
     r = sub.add_parser("recap", help="brag-doc recap in Markdown")
     r.add_argument("--days", type=int, default=7)
+    c = sub.add_parser("chart", help="write chart.html: heatmap, cumulative XP and weekly bars")
+    c.add_argument("--demo", action="store_true", help="draw a made-up season. Reads no GitHub data and no log")
+    c.add_argument("--no-open", action="store_true", help="write the file and do not open it")
     lg = sub.add_parser("log", help="log a card, a check or an off day")
     lg.add_argument("kind", choices=["card", "check", "off"])
     lg.add_argument("--pr", help="owner/repo#n")
@@ -387,7 +422,7 @@ def main():
     lg.add_argument("--text")
     lg.add_argument("--own", action="store_true", help="the check is for your own PR")
     a = ap.parse_args()
-    {"status": cmd_status, "recap": cmd_recap, "log": cmd_log, "selftest": selftest}[a.cmd](a)
+    {"status": cmd_status, "recap": cmd_recap, "chart": cmd_chart, "log": cmd_log, "selftest": selftest}[a.cmd](a)
 
 if __name__ == "__main__":
     main()
