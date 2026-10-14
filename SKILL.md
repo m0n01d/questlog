@@ -289,7 +289,7 @@ If the user typed only `campaign`, follow these steps.
    - If the report still says "No plan yet", offer `campaign start <EPIC>` and stop.
 2. Read the last entry of the journal. If the journal has no entry, use the report alone.
 3. Write "Previously on" in three to five sentences. Use only the journal and the report.
-4. If a chapter line ends with `XP on` and the date of today, tell how the chapter closed. Use one or two sentences. Then add a journal line.
+4. If a chapter line ends with `XP on` and the date of today, read the journal of today. If it does not tell that close yet, tell how the chapter closed in one or two sentences. Then add a journal line.
 5. Name one goal for today from the first open chapter. Add the goal to the journal.
 6. If every chapter in the report says done, tell the user that the campaign is complete.
 

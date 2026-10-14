@@ -163,14 +163,30 @@ def datadir():
     d.mkdir(parents=True, exist_ok=True)
     return d
 
-def read_local(path):
-    """The scoring events of log.jsonl. A kind that is not in the table below, such as trophy, is skipped and scores nothing."""
+def log_records(path):
+    """The JSON objects of log.jsonl. A line that is not UTF-8 JSON, or not an object, is skipped."""
     out = []
-    for ln in path.read_text(encoding="utf-8").splitlines() if path.exists() else []:
+    for ln in path.read_text(encoding="utf-8", errors="replace").splitlines() if path.exists() else []:
         try:
             r = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(r, dict):
+            out.append(r)
+    return out
+
+def read_local(path):
+    """The scoring events of log.jsonl. A kind that is not in the table below, such as trophy, is skipped and scores nothing.
+    A chapter scores one time for each (campaign, chapter) pair, as `chapter_paid` reads it."""
+    out, paid = [], set()
+    for r in log_records(path):
+        try:
+            pair = (r["campaign"], r["chapter"]) if r["kind"] == "chapter" else None
+            if pair and (pair in paid or not all(isinstance(x, str) for x in pair)):
+                continue
             xp = {"card": XP_CARD, "check": XP_CHECK_POINT * int(r.get("score", 0)), "off": 0, "chapter": XP_CHAPTER}[r["kind"]]
             out.append(dict(r, days=[date.fromisoformat(r["date"])], xp=xp))
+            paid.add(pair)
         except (ValueError, KeyError, TypeError, AttributeError):
             continue
     return out
@@ -332,12 +348,15 @@ def plan_errors(plan, jira, path):
     if not (isinstance(plan, dict) and isinstance(plan.get("chapters"), list) and plan["chapters"] and isinstance(plan.get("traps", []), list)):
         return [p + 'expected {"epic": ..., "chapters": [{"name": ..., "issues": [...]}], "traps": [{"area": ..., "risk": ...}]}']
     errs = [p + f"epic is {plan.get('epic')!r}, not {jira['epic']!r}"] if plan.get("epic") != jira["epic"] else []
-    known, seen = {i["key"] for i in jira["issues"]}, {}
+    known, seen, names = {i["key"] for i in jira["issues"]}, {}, {}
     for n, c in enumerate(plan["chapters"], 1):
         c = c if isinstance(c, dict) else {}
         if bad(c.get("name")) or not (isinstance(c.get("issues"), list) and c["issues"]):
             errs.append(p + f"chapter {n} needs a name and a list of issues")
             continue
+        if c["name"] in names:                                     # a chapter pays XP by its name, so a name is used one time
+            errs.append(p + f"chapter {n} has the same name as chapter {names[c['name']]}")
+        names.setdefault(c["name"], n)
         for k in c["issues"]:
             if not isinstance(k, str) or k not in known:
                 errs.append(p + f"chapter {n} names {clean(k)}, which is not an issue of the epic")
@@ -372,10 +391,9 @@ def chapters_closed(plan, iss, prs):
 def chapter_paid(path, epic):
     """{raw chapter name: date} for the chapter events of one campaign in log.jsonl, from all seasons."""
     paid = {}
-    for ln in path.read_text(encoding="utf-8").splitlines() if path.exists() else []:
+    for r in log_records(path):
         try:
-            r = json.loads(ln)
-            if r["kind"] == "chapter" and r["campaign"] == epic:
+            if r["kind"] == "chapter" and r["campaign"] == epic and isinstance(r["chapter"], str):
                 paid.setdefault(r["chapter"], date.fromisoformat(r["date"]).isoformat())
         except (ValueError, KeyError, TypeError, AttributeError):
             continue
@@ -425,9 +443,8 @@ def status_campaign(old):
 def bestiary(path, epic):
     """['Bestiary: mimic 2, zombie 1'] for the trophies of one campaign in log.jsonl, in checklist order. [] with none."""
     n = Counter()
-    for ln in path.read_text(encoding="utf-8").splitlines() if path.exists() else []:
+    for r in log_records(path):
         try:
-            r = json.loads(ln)
             if r["kind"] == "trophy" and r.get("campaign") == epic:
                 n[r["monster"]] += 1
         except (ValueError, KeyError, TypeError, AttributeError):
@@ -808,6 +825,8 @@ def selftest(_=None):
         assert len(errs) == 1 and msg in errs[0], (msg, errs)
     assert plan_errors([], jira, Path("plan.json"))[0].startswith("plan.json: expected")
     assert "\x1b" not in plan_errors(dict(plan, chapters=[{"name": "X", "issues": ["\x1b]0;x\x07"]}]), jira, Path("plan.json"))[0]
+    assert plan_errors(dict(plan, chapters=[{"name": "X", "issues": ["ABC-2"]}, {"name": "X", "issues": ["ABC-3"]}]), jira, Path("p"))[0] \
+        == "p: chapter 2 has the same name as chapter 1"
     prs = [{"ABC-2"}, {"ABC-2", "ABC-3"}, {"ABC-1", "ABC-4"}, {"ABC-1"}, set()]      # a PR counts once for a chapter
     assert campaign_report(jira, False, plan, prs, D(2026, 10, 14), {}) == [
         "CAMPAIGN ABC-1 Export the audit log | started 2026-10-01 (day 14) | Jira read 2026-10-14 09:02",
@@ -864,6 +883,10 @@ def selftest(_=None):
         assert bestiary(lp, "ABC-2") == ["Bestiary: roper 1"] and bestiary(lp, "ABC-3") == []
         log("card", text="x")
         assert [e["kind"] for e in read_local(lp)] == ["card"] and tally(read_local(lp))["xp"] == XP_CARD    # a trophy pays no XP
+        bad, ch = Path(td) / "bad.jsonl", dict(kind="chapter", date="2026-10-13", campaign="ABC-1", chapter="Gate")
+        bad.write_bytes(b"\xff\xfe\n" + (json.dumps(ch) + "\n").encode() * 2 + (json.dumps(dict(ch, chapter=None)) + "\n").encode())
+        assert tally(read_local(bad))["xp"] == XP_CHAPTER and chapter_paid(bad, "ABC-1") == {"Gate": "2026-10-13"}   # no crash, one pay
+        assert bestiary(bad, "ABC-1") == []
     area = "acme/api:db/migrations"
     assert in_area("acme/api", "db/migrations/1.sql", area) and in_area("Acme/API", "db/migrations/x/y.sql", area) and in_area("acme/api", "db/migrations", area)
     assert not any(in_area(r, p, area) for r, p in (("acme/web", "db/migrations/1.sql"), ("acme/api", "db/migrations2/x.sql"),
