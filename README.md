@@ -67,14 +67,16 @@ python3 ~/code/questlog/questlog.py selftest
 ## Use
 
 ```
-/questlog                  show level, streak, counts, achievements and quests
-/questlog slice <task>     plan a stack of small PRs for a task
-/questlog review <pr>      answer questions about a PR, then read the findings
-/questlog own <pr>         the same as review, for your own PR
-/questlog card <text>      log one thing that you learned
-/questlog off <date>       mark a day off
-/questlog recap [days]     write a brag-doc recap (default 7 days)
-/questlog chart [--demo]   draw the season as a chart page
+/questlog                         show level, streak, counts, achievements and quests
+/questlog slice <task>            plan a stack of small PRs for a task
+/questlog review <pr>             answer questions about a PR, then read the findings
+/questlog own <pr>                the same as review, for your own PR
+/questlog card <text>             log one thing that you learned
+/questlog off <date>              mark a day off
+/questlog recap [days]            write a brag-doc recap (default 7 days)
+/questlog chart [--demo]          draw the season as a chart page
+/questlog campaign start <epic>   plan the chapters of a Jira epic (session zero)
+/questlog campaign                open the day with the story so far and a goal
 ```
 
 - `<pr>` is `owner/repo#n`, a PR URL, or a number in the current repo.
@@ -180,7 +182,7 @@ On a machine with no display, add `--no-open`. Then open the file on another mac
 
 ## Campaign mode
 
-Campaign mode turns a Jira epic into a campaign. The `campaign` command reads the epic and its child issues from Jira. It links your merged PRs to the issues by the Jira key in the PR title or branch. Then it prints one report. The design is in [docs/CAMPAIGN.md](docs/CAMPAIGN.md). Only the script part exists so far. The skill does not use it yet.
+Campaign mode turns a Jira epic into a campaign. The `campaign` command reads the epic and its child issues from Jira. It links your merged PRs to the issues by the Jira key in the PR title or branch. Then it prints one report. In Claude Code, Claude plays the game master (the narrator and referee) and keeps a journal. The design is in [docs/CAMPAIGN.md](docs/CAMPAIGN.md). The skill checks and the XP bonus are not built yet.
 
 Campaign mode needs macOS, because the token lives in the Keychain. Set it up with these steps:
 
@@ -196,6 +198,11 @@ Campaign mode needs macOS, because the token lives in the Keychain. Set it up wi
 
 Then run `python3 ~/.claude/skills/questlog/questlog.py campaign ABC-1`. Without an epic key, the command uses the active campaign. If Jira cannot be reached, it prints the reason and uses the last saved read.
 
+In Claude Code, use these two commands:
+
+- `/questlog campaign start <epic>` runs session zero. Claude reads the issue summaries and proposes chapters and traps. After your yes, it writes `plan.json`.
+- `/questlog campaign` opens the day. Claude tells the story so far from the journal, names one goal, and adds the goal to the journal.
+
 ## Data and privacy
 
 - The script keeps its data in `~/.claude/questlog/`. Set `QUESTLOG_DIR` to use another folder.
@@ -203,6 +210,7 @@ Then run `python3 ~/.claude/skills/questlog/questlog.py campaign ABC-1`. Without
 - `rubric.md` holds the expected answers of the last review. The next review overwrites it.
 - `chart.html` holds the last chart.
 - `campaigns/<EPIC>/jira.json` holds the last Jira read: the epic summary, and the key, summary and status category of each child issue.
+- `campaigns/<EPIC>/plan.json` holds the chapters and the traps. `campaigns/<EPIC>/journal.md` holds the story journal. Claude writes both files. Claude only adds lines to the journal.
 - If you say yes to a recap append, Claude writes the recap to `brag.md`.
 - The script talks to GitHub through `gh`. In campaign mode it also sends GET requests to your Jira site, and to nothing else. It has no telemetry.
 - The Jira token stays in the Keychain. The script keeps it in memory only and never prints, logs or saves it. It sends the token only to the `https://` address in `QUESTLOG_JIRA_URL`, and it does not follow redirects.

@@ -1,6 +1,6 @@
 # Campaign mode
 
-Status: approved 2026-10-14. Step 1 of the build order is built. Steps 2 to 7 are not.
+Status: approved 2026-10-14. Steps 1 and 2 of the build order are built. Steps 3 to 7 are not.
 
 Campaign mode adds a story to questlog. A Jira epic becomes a campaign, and Claude is the game master (the narrator and referee of a tabletop game). The own-PR gate becomes a skill check. When a chapter closes, a new bonus pays XP. All other XP rules stay the same.
 
@@ -153,7 +153,7 @@ The script makes sure that each key is an issue of the epic, and that no key is 
 | `sheet` | Prints the character sheet. |
 | `roll d20` | Rolls dice for flavor and loot. |
 
-The `status` command gets one line from `jira.json`, with no Jira call: `Campaign ABC-1: chapter 2 of 3`.
+The `status` command gets one line from `jira.json` and `plan.json`, with no Jira call: `Campaign ABC-1: chapter 2 of 3`. The other texts are `no Jira read yet`, `no plan yet` and `complete`.
 
 The campaign report looks like this sample. The names are made up. This is the real output of step 1.
 
