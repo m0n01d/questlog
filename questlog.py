@@ -366,12 +366,12 @@ def campaign_report(jira, cached, plan, prs, today):
 
 def cmd_campaign(a):
     today, st = date.today(), load_state()
-    if not (a.epic or st.get("campaign")):
+    if a.epic is None and not st.get("campaign"):
         die("there is no active campaign. Run: python3 questlog.py campaign ABC-1")
-    epic = epic_key(a.epic or st["campaign"])
+    epic = epic_key(st.get("campaign") if a.epic is None else a.epic)
     cdir, base = datadir() / "campaigns" / epic, jira_base(os.environ.get("QUESTLOG_JIRA_URL"))
     jira, cached = jira_load(cdir / "jira.json", epic, base, jira_auth() if base else None)
-    if a.epic:
+    if a.epic is not None:
         (datadir() / "state.json").write_text(json.dumps({**st, "campaign": epic}))
     plan, errs, pp = None, [], cdir / "plan.json"
     if pp.exists():
