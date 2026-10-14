@@ -28,9 +28,11 @@ ACHIEVEMENTS = [                      # (name, what it counts, goal)
 GQL = ("query($q:String!,$type:SearchType!,$after:String){search(query:$q,type:$type,first:100,after:$after)"
        "{pageInfo{hasNextPage endCursor}nodes{...on PullRequest{%s}}}}")
 WARNED = []                           # warn once about partial GitHub errors
-PR = "number title url repository{nameWithOwner} "
+PR = "number title url headRefName repository{nameWithOwner} "
 PR_REF = re.compile(r"^(?:https?://[^/\s]+/)?([\w.-]+/[\w.-]+)(?:#|/pull/)(\d+)(?:[/?#].*)?$")
 FILES = "additions deletions changedFiles files(first:100){nodes{path additions deletions}}"
+KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]+-[0-9]+")    # a Jira key such as ABC-12
+CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\ud800-\udfff]")    # C0, DEL, C1 and lone surrogates
 
 def level(xp): return 1 + math.isqrt(xp // XP_PER_STEP)
 def title(lv): return TITLES[max(k for k in TITLES if k <= lv)]
@@ -44,6 +46,20 @@ def norm_ref(s):
     """owner/repo#n from owner/repo#n or a PR URL. None for anything else."""
     m = PR_REF.match((s or "").strip())
     return f"{m[1]}#{m[2]}" if m else None
+
+def clean(s):
+    """Text without control characters. Jira text could carry terminal escapes."""
+    return CTRL_RE.sub("", str(s))
+
+def epic_key(s):
+    """The epic key in upper case. It goes into JQL and into a path, so only a plain key passes."""
+    if not (isinstance(s, str) and KEY_RE.fullmatch(s)):
+        die("the epic must be a Jira key like ABC-1")
+    return s.upper()
+
+def pr_keys(pr_title, branch, known):
+    """Keys in `known` that a PR names in its title or branch. Other matches, such as UTF-8, link nothing."""
+    return {k.upper() for k in KEY_RE.findall(pr_title + " " + branch)} & known
 
 def season_bounds(d):
     """First and last day of the calendar quarter that holds d."""
@@ -96,7 +112,8 @@ def areas(repo, paths):
 
 def pr_info(n):
     repo = n["repository"]["nameWithOwner"]
-    return dict(title=n["title"], url=n["url"], repo=repo, ref=ref(n), areas=areas(repo, [f["path"] for f in files(n)]))
+    return dict(title=n["title"], branch=n.get("headRefName") or "", url=n["url"], repo=repo, ref=ref(n),
+                areas=areas(repo, [f["path"] for f in files(n)]))
 
 def merged_event(n):
     lines = (n["additions"] + n["deletions"] if n["changedFiles"] > MAX_FILES
@@ -402,6 +419,24 @@ def selftest(_=None):
         return subprocess.CompletedProcess(args, 0, json.dumps(body), "")
     assert search("q", "number", run=fake) == [{"n": 1}, {"n": 2}]
     assert seen == ["type=ISSUE", "type=ISSUE_ADVANCED", "type=ISSUE_ADVANCED+p2"], seen
+
+    import contextlib, io
+
+    def dies(f, *args):
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                f(*args)
+            except SystemExit:
+                return True
+        return False
+    known = {"ABC-1", "ABC-2", "ABC-3"}
+    assert pr_keys("Fix UTF-8 and XYZ-9", "fix-utf-8", known) == set()               # not an issue of the epic
+    assert pr_keys("Export", "abc-2-export", known) == {"ABC-2"}                      # a branch links, in lower case
+    assert pr_keys("[abc-3] Gate ABC-1", "main", known) == {"ABC-1", "ABC-3"}
+    assert merged_event(dict(pr([("src/a.py", 20, 0)]), headRefName="abc-2-export"))["branch"] == "abc-2-export"
+    assert [epic_key(x) for x in ("abc-1", "ABC_D-12")] == ["ABC-1", "ABC_D-12"]
+    assert all(dies(epic_key, x) for x in ("ABC-1 OR project = X", "ABC-1\n", "", "ABC", "A-1", "ÄBC-1", None))
+    assert clean("a\x1b[31mb\x07\x7f\x85c\ud800") == "a[31mbc"
     print("ok")
 
 def main():
