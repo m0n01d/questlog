@@ -178,14 +178,34 @@ The page is one file. It has inline SVG and CSS, with no script and no network r
 
 On a machine with no display, add `--no-open`. Then open the file on another machine. Add `--demo` to draw a made-up season. The demo reads no GitHub data and no log.
 
+## Campaign mode
+
+Campaign mode turns a Jira epic into a campaign. The `campaign` command reads the epic and its child issues from Jira. It links your merged PRs to the issues by the Jira key in the PR title or branch. Then it prints one report. The design is in [docs/CAMPAIGN.md](docs/CAMPAIGN.md). Only the script part exists so far. The skill does not use it yet.
+
+Campaign mode needs macOS, because the token lives in the Keychain. Set it up with these steps:
+
+1. Make an API token at https://id.atlassian.com/manage-profile/security/api-tokens. For a scoped token, add the scope `read:jira-work`.
+2. Store the token in the Keychain. The command asks for the token, so the token stays out of the shell history.
+
+   ```sh
+   security add-generic-password -s questlog-jira -a 'you@example.com' -w
+   ```
+
+3. For a scoped token, get the cloud ID from `https://<site>.atlassian.net/_edge/tenant_info`.
+4. Add `export QUESTLOG_JIRA_URL=<base URL>` to `~/.zshrc`. For a classic token, the base URL is `https://<site>.atlassian.net`. For a scoped token, it is `https://api.atlassian.com/ex/jira/<cloudId>`.
+
+Then run `python3 ~/.claude/skills/questlog/questlog.py campaign ABC-1`. Without an epic key, the command uses the active campaign. If Jira cannot be reached, it prints the reason and uses the last saved read.
+
 ## Data and privacy
 
 - The script keeps its data in `~/.claude/questlog/`. Set `QUESTLOG_DIR` to use another folder.
-- `log.jsonl` holds your cards, checks and off days. `state.json` holds the season, the level and the unlocked achievements.
+- `log.jsonl` holds your cards, checks and off days. `state.json` holds the season, the level, the unlocked achievements and the active campaign.
 - `rubric.md` holds the expected answers of the last review. The next review overwrites it.
 - `chart.html` holds the last chart.
+- `campaigns/<EPIC>/jira.json` holds the last Jira read: the epic summary, and the key, summary and status category of each child issue.
 - If you say yes to a recap append, Claude writes the recap to `brag.md`.
-- The script talks to GitHub through `gh` and to nothing else. It has no telemetry.
+- The script talks to GitHub through `gh`. In campaign mode it also sends GET requests to your Jira site, and to nothing else. It has no telemetry.
+- The Jira token stays in the Keychain. The script keeps it in memory only and never prints, logs or saves it. It sends the token only to the `https://` address in `QUESTLOG_JIRA_URL`, and it does not follow redirects.
 - Claude reads PR titles in your session. For `review` and `own`, Claude also reads the diff. questlog sends neither anywhere else.
 - To start over, remove the `~/.claude/questlog/` folder.
 

@@ -1,6 +1,6 @@
 # Campaign mode
 
-Status: draft for review, 2026-10-14. Nothing in this file is built. The design waits for approval before any code changes.
+Status: approved 2026-10-14. Step 1 of the build order is built. Steps 2 to 7 are not.
 
 Campaign mode adds a story to questlog. A Jira epic becomes a campaign, and Claude is the game master (the narrator and referee of a tabletop game). The own-PR gate becomes a skill check. When a chapter closes, a new bonus pays XP. All other XP rules stay the same.
 
@@ -102,6 +102,7 @@ The script obeys these rules:
 
 - It sends only GET requests. It has no code that writes to Jira.
 - It refuses a base URL that does not start with `https://`.
+- It does not follow redirects, so the token goes only to the base URL.
 - It never prints, logs or saves the token. It reads the token on each run and keeps it in memory only.
 - If the Keychain item is missing, it sends the request with no auth. A public site answers, and a private site refuses.
 - If Jira answers 401 or 403, it prints one line: the token is missing, wrong or expired. Then it uses the cache.
@@ -124,7 +125,7 @@ The data folder gets one folder for each campaign, `campaigns/<EPIC>/`:
 
 | File | Writer | Content |
 |---|---|---|
-| `jira.json` | Script | The last issue list: key, summary, status category and the date of the read |
+| `jira.json` | Script | The epic summary, the start date, the last issue list (key, summary, status category) and the date of the read |
 | `plan.json` | Claude, after the user says yes | The chapters (name and issue keys) and the traps (area and risk) |
 | `journal.md` | Claude | One dated entry for each day. Claude only adds lines at the end. |
 | `epilogue.md` | Claude | The brag doc at the end of the campaign |
@@ -154,16 +155,18 @@ The script makes sure that each key is an issue of the epic, and that no key is 
 
 The `status` command gets one line from `jira.json`, with no Jira call: `Campaign ABC-1: chapter 2 of 3`.
 
-The campaign report looks like this sample. The names are made up.
+The campaign report looks like this sample. The names are made up. This is the real output of step 1.
 
 ```
 CAMPAIGN ABC-1 Export the audit log | started 2026-10-01 (day 14) | Jira read 2026-10-14 09:02
-Chapter 1 The Gate     done  2/2 issues  2 PRs  +25 XP on 2026-10-09
+Chapter 1 The Gate     done  2/2 issues  2 PRs
 Chapter 2 The Ledger   open  1/2 issues  1 PR
-Unplaced: ABC-6 Add a CSV header
-Bestiary: mimic 2, zombie 1, invisible stalker 1
-Wandering monster (week 42): acme/api#88 src/export/rounding.py
+  ABC-5 new  Write the ledger rows
+Unplaced
+  ABC-6 new  Add a CSV header
 ```
+
+Day N is the days since the start, plus 1. Under an open chapter, the report lists its issues that are not done. When all the issues of a chapter are done, the chapter is done. PRs are your merged PRs of the season with a key of the chapter. With no plan, the report prints "No plan yet. Issues:" and every issue. If Jira cannot be read, the first line ends with "(cache)". Later steps add the XP of a closed chapter (step 4), the bestiary line (step 3) and the wandering monster (step 6).
 
 ### Session zero
 
@@ -301,6 +304,7 @@ The proposed v0 is steps 1 to 4. Steps 5 to 7 come after v0 runs at work.
 
 ## Known gaps
 
+- A PR merged before the season start does not link. `campaign` reads the merged PRs of the current quarter only.
 - If a PR names only a subtask key, it does not link in v0. If the team puts subtask keys in PR titles, add subtasks.
 - Session zero reads issue summaries only, not descriptions.
 - CHA counts from the time that the PR opened, not from the review request. A long draft makes CHA lower.

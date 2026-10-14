@@ -2,7 +2,7 @@
 """questlog: score your engineering work. GitHub data comes from `gh`. Stdlib only, Python 3.9+."""
 from __future__ import annotations
 
-import argparse, json, math, os, re, subprocess, sys  # noqa: E401
+import argparse, base64, http.client, json, math, os, re, subprocess, sys, urllib.error, urllib.parse, urllib.request  # noqa: E401
 from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -28,9 +28,11 @@ ACHIEVEMENTS = [                      # (name, what it counts, goal)
 GQL = ("query($q:String!,$type:SearchType!,$after:String){search(query:$q,type:$type,first:100,after:$after)"
        "{pageInfo{hasNextPage endCursor}nodes{...on PullRequest{%s}}}}")
 WARNED = []                           # warn once about partial GitHub errors
-PR = "number title url repository{nameWithOwner} "
+PR = "number title url headRefName repository{nameWithOwner} "
 PR_REF = re.compile(r"^(?:https?://[^/\s]+/)?([\w.-]+/[\w.-]+)(?:#|/pull/)(\d+)(?:[/?#].*)?$")
 FILES = "additions deletions changedFiles files(first:100){nodes{path additions deletions}}"
+KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]+-[0-9]+")    # a Jira key such as ABC-12
+CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\ud800-\udfff]")    # C0, DEL, C1 and lone surrogates
 
 def level(xp): return 1 + math.isqrt(xp // XP_PER_STEP)
 def title(lv): return TITLES[max(k for k in TITLES if k <= lv)]
@@ -44,6 +46,21 @@ def norm_ref(s):
     """owner/repo#n from owner/repo#n or a PR URL. None for anything else."""
     m = PR_REF.match((s or "").strip())
     return f"{m[1]}#{m[2]}" if m else None
+
+def clean(s):
+    """Text without control characters. Jira text could carry terminal escapes."""
+    return CTRL_RE.sub("", str(s))
+
+def epic_key(s):
+    """The epic key in upper case. It goes into JQL and into a path, so only a plain key passes."""
+    if not (isinstance(s, str) and KEY_RE.fullmatch(s)):
+        die("the epic must be a Jira key like ABC-1")
+    return s.upper()
+
+def pr_keys(pr_title, branch, known):
+    """Keys in `known` that a PR names in its title or branch. Other matches, such as UTF-8, link nothing."""
+    found = {k.upper() for k in KEY_RE.findall(pr_title + " " + branch)}
+    return {k.split("_", i)[-1] for k in found for i in range(k.count("_") + 1)} & known   # fix_abc-2 names ABC-2
 
 def season_bounds(d):
     """First and last day of the calendar quarter that holds d."""
@@ -96,7 +113,8 @@ def areas(repo, paths):
 
 def pr_info(n):
     repo = n["repository"]["nameWithOwner"]
-    return dict(title=n["title"], url=n["url"], repo=repo, ref=ref(n), areas=areas(repo, [f["path"] for f in files(n)]))
+    return dict(title=n["title"], branch=n.get("headRefName") or "", url=n["url"], repo=repo, ref=ref(n),
+                areas=areas(repo, [f["path"] for f in files(n)]))
 
 def merged_event(n):
     lines = (n["additions"] + n["deletions"] if n["changedFiles"] > MAX_FILES
@@ -204,6 +222,175 @@ def collect(who, start):
     return mark_owned([merged_event(n) for n in merged if n.get("mergedAt")]
                       + [e for n in seen for e in review_event(n, start)] + read_local(datadir() / "log.jsonl"))
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kw):    # a redirect would carry the token to another place
+        return None
+
+def http_get(url, auth):
+    """GET a URL and return the body as text. The only code that talks to Jira. It never writes."""
+    hdr = {"Accept": "application/json", **({"Authorization": auth} if auth else {})}
+    with urllib.request.build_opener(NoRedirect).open(urllib.request.Request(url, headers=hdr, method="GET"), timeout=20) as r:
+        return r.read().decode("utf-8", "replace")
+
+def jira_base(url):
+    """The base URL without a trailing slash, or "" if unset. The token goes only over HTTPS, so any other scheme dies."""
+    base = (url or "").strip().rstrip("/")
+    if base and not base.startswith("https://"):
+        die("QUESTLOG_JIRA_URL must start with https://")
+    return base
+
+def basic_auth(meta, token):
+    """The Authorization value from the attribute list of `security` and the token, or None."""
+    m = re.search(r'^\s*"acct"<blob>="(.*)"\s*$', meta, re.M)
+    return "Basic " + base64.b64encode(f"{m[1]}:{token}".encode()).decode() if m and token else None
+
+def jira_auth():
+    """Basic auth from the Keychain item questlog-jira, or None for no auth. The token stays in memory."""
+    def sec(*flag):
+        return subprocess.run(["security", "find-generic-password", "-s", "questlog-jira", *flag],
+                              capture_output=True, encoding="utf-8", errors="replace")
+    try:
+        meta, tok = sec(), sec("-w")
+    except OSError:
+        return None
+    return None if meta.returncode or tok.returncode else basic_auth(meta.stdout, tok.stdout.strip())
+
+def jira_issue(i):
+    """One issue as key, summary and status category (new, indeterminate or done)."""
+    f = i["fields"]
+    return {"key": clean(i["key"]), "summary": clean(f["summary"]), "status": clean(f["status"]["statusCategory"]["key"])}
+
+def key_order(k):
+    proj, _, num = k.rpartition("-")
+    return proj, int(num)
+
+def jira_pull(base, epic, auth, get):
+    """(the epic issue or None, its child issues by project and number). One GET for each page, 50 pages at most."""
+    raw, tok = [], None
+    for _ in range(50):
+        q = {"jql": f"key = {epic} OR parent = {epic}", "fields": "summary,status", "maxResults": 100}
+        if tok:
+            q["nextPageToken"] = tok
+        page = json.loads(get(f"{base}/rest/api/3/search/jql?" + urllib.parse.urlencode(q), auth))
+        raw += page["issues"]
+        if page["isLast"]:
+            break
+        tok = page["nextPageToken"]
+    else:
+        raise ValueError("more than 50 pages")
+    rows = [jira_issue(i) for i in raw]
+    kids = sorted((r for r in rows if r["key"] != epic), key=lambda r: key_order(r["key"]))
+    return next((r for r in rows if r["key"] == epic), None), kids
+
+def jira_cache(path, epic):
+    """The saved jira.json as a dict, or None if it is missing or does not look right."""
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+        date.fromisoformat(d["started"])
+        ok = d["epic"] == epic and all(k in d for k in ("summary", "read_at")) and all(set(i) >= {"key", "summary", "status"} for i in d["issues"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return d if ok else None
+
+def jira_load(path, epic, base, auth, get=http_get):
+    """(data, from_cache). Read Jira and save it to `path`. If the read fails, say why and use the saved file."""
+    old, why = jira_cache(path, epic), "QUESTLOG_JIRA_URL is not set, so questlog did not read Jira."
+    if base:
+        try:
+            top, kids = jira_pull(base, epic, auth, get)
+            why = None
+        except urllib.error.HTTPError as e:
+            why = (f"Jira refused the request (HTTP {e.code}). The token is missing, wrong or expired." if e.code in (401, 403)
+                   else f"Jira answered HTTP {e.code}.")
+        except OSError as e:
+            why = f"Jira could not be reached ({getattr(e, 'reason', e)})."
+        except (ValueError, KeyError, TypeError, http.client.HTTPException) as e:
+            why = f"Jira sent an answer that questlog cannot read ({str(e) or type(e).__name__})."
+    if why:
+        if not old:
+            die(f"{clean(why)} There is no saved copy of {epic} to use instead.")
+        print("questlog: " + clean(why), file=sys.stderr)
+        return old, True
+    if not top:
+        die(f"{epic} is not in Jira, or this account cannot see it.")
+    data = {"epic": epic, "summary": top["summary"], "started": old["started"] if old else date.today().isoformat(),
+            "read_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "issues": kids}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    return data, False
+
+def plan_errors(plan, jira, path):
+    """Error strings for a plan.json, each starting with the file path. An empty list means the plan is good."""
+    p = f"{path}: "
+
+    def bad(v): return not (isinstance(v, str) and v.strip())
+    if not (isinstance(plan, dict) and isinstance(plan.get("chapters"), list) and plan["chapters"] and isinstance(plan.get("traps", []), list)):
+        return [p + 'expected {"epic": ..., "chapters": [{"name": ..., "issues": [...]}], "traps": [{"area": ..., "risk": ...}]}']
+    errs = [p + f"epic is {plan.get('epic')!r}, not {jira['epic']!r}"] if plan.get("epic") != jira["epic"] else []
+    known, seen = {i["key"] for i in jira["issues"]}, {}
+    for n, c in enumerate(plan["chapters"], 1):
+        c = c if isinstance(c, dict) else {}
+        if bad(c.get("name")) or not (isinstance(c.get("issues"), list) and c["issues"]):
+            errs.append(p + f"chapter {n} needs a name and a list of issues")
+            continue
+        for k in c["issues"]:
+            if not isinstance(k, str) or k not in known:
+                errs.append(p + f"chapter {n} names {clean(k)}, which is not an issue of the epic")
+            elif k in seen:
+                errs.append(p + f"{k} is in chapters {seen[k]} and {n}")
+            else:
+                seen[k] = n
+    for n, t in enumerate(plan.get("traps", []), 1):
+        t = t if isinstance(t, dict) else {}
+        if bad(t.get("area")) or bad(t.get("risk")):
+            errs.append(p + f"trap {n} needs an area and a risk")
+    return errs
+
+def campaign_report(jira, cached, plan, prs, today):
+    """The campaign report as lines. `plan` is None for no plan. `prs` holds the key set of each merged PR of the season."""
+    iss = {i["key"]: i for i in jira["issues"]}
+
+    def row(k): return f"  {k} {iss[k]['status']}  {iss[k]['summary']}"
+    day = (today - date.fromisoformat(jira["started"])).days + 1
+    out = [f"CAMPAIGN {jira['epic']} {jira['summary']} | started {jira['started']} (day {day}) | Jira read {jira['read_at']}"
+           + (" (cache)" if cached else "")]
+    if not plan:
+        return out + ["No plan yet. Issues:"] + [row(k) for k in iss]
+    names = [clean(c["name"]) for c in plan["chapters"]]
+    w, placed = max(map(len, names)), {k for c in plan["chapters"] for k in c["issues"]}
+    for n, (c, name) in enumerate(zip(plan["chapters"], names), 1):
+        todo, npr = [k for k in c["issues"] if iss[k]["status"] != "done"], sum(bool(set(c["issues"]) & x) for x in prs)
+        out.append(f"Chapter {n} {name:<{w}}   {'open' if todo else 'done'}  {len(c['issues']) - len(todo)}/{len(c['issues'])} issues"
+                   f"  {npr} PR{'s' * (npr != 1)}")
+        out += [row(k) for k in todo]
+    return out + (["Unplaced"] + [row(k) for k in iss if k not in placed] if set(iss) - placed else [])
+
+def cmd_campaign(a):
+    today, st = date.today(), load_state()
+    if a.epic is None and not st.get("campaign"):
+        die("there is no active campaign. Run: python3 questlog.py campaign ABC-1")
+    epic = epic_key(st.get("campaign") if a.epic is None else a.epic)
+    cdir, base = datadir() / "campaigns" / epic, jira_base(os.environ.get("QUESTLOG_JIRA_URL"))
+    auth = jira_auth() if base else None
+    if base and not auth:
+        print("questlog: the Keychain item questlog-jira gave no token, so the Jira request has no auth.", file=sys.stderr)
+    jira, cached = jira_load(cdir / "jira.json", epic, base, auth)
+    if a.epic is not None:
+        (datadir() / "state.json").write_text(json.dumps({**st, "campaign": epic}))
+    plan, errs, pp = None, [], cdir / "plan.json"
+    if pp.exists():
+        try:
+            plan = json.loads(pp.read_text(encoding="utf-8"))
+            errs = plan_errors(plan, jira, pp)
+        except (OSError, ValueError) as e:
+            errs = [f"{pp}: cannot read the file ({e})"]
+    s0, known = season_bounds(today)[0], {i["key"] for i in jira["issues"]} | {epic}
+    prs = [pr_keys(e["title"], e["branch"], known) for e in collect(whoami(), s0) if e["kind"] == "merged" and ev_in(e, s0, today)]
+    if errs:
+        print("\n".join(errs), file=sys.stderr)
+    print("\n".join(campaign_report(jira, cached, None if errs else plan, prs, today)))
+    sys.exit(1 if errs else 0)
+
 def cmd_log(a):
     today = date.today()
     try:
@@ -248,14 +435,14 @@ def cmd_status(_):
     cur, best = streaks(active, off, s0, today)
     ts, tw = tally(season), tally(week)
     ts["best"] = best
-    xp, lv, st = ts["xp"], level(ts["xp"]), load_state()
-    st = st if st.get("season") == label else {}      # a new season starts from zero
+    xp, lv, old = ts["xp"], level(ts["xp"]), load_state()
+    st = old if old.get("season") == label else {}    # a new season starts from zero
     have = set(st.get("unlocked", []))
     new = [n for n, k, g in ACHIEVEMENTS if ts[k] >= g and n not in have]
     out = [f"LEVEL UP: level {st.get('level', 1)} -> {lv}, {title(lv)}"] if lv > st.get("level", 1) else []
     out += [f"UNLOCKED: {n}" for n in new]
     have.update(new)
-    (datadir() / "state.json").write_text(json.dumps({"season": label, "level": lv, "unlocked": sorted(have)}))
+    (datadir() / "state.json").write_text(json.dumps({**old, "season": label, "level": lv, "unlocked": sorted(have)}))
 
     def cells(t):
         return [f"{t['merged']} ({t['clean']} clean, {t['tested']} tested, owned {t['owned']})",
@@ -402,6 +589,109 @@ def selftest(_=None):
         return subprocess.CompletedProcess(args, 0, json.dumps(body), "")
     assert search("q", "number", run=fake) == [{"n": 1}, {"n": 2}]
     assert seen == ["type=ISSUE", "type=ISSUE_ADVANCED", "type=ISSUE_ADVANCED+p2"], seen
+
+    import contextlib, io
+
+    def dies(f, *args):
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                f(*args)
+            except SystemExit:
+                return True
+        return False
+    known = {"ABC-1", "ABC-2", "ABC-3"}
+    assert pr_keys("Fix UTF-8 and XYZ-9", "fix-utf-8", known) == set()               # not an issue of the epic
+    assert pr_keys("Export", "abc-2-export", known) == {"ABC-2"}                      # a branch links, in lower case
+    assert pr_keys("[abc-3] Gate ABC-1", "main", known) == {"ABC-1", "ABC-3"}
+    assert pr_keys("Export", "fix_abc-2-export", known) == {"ABC-2"}                  # a prefix joined by _
+    assert merged_event(dict(pr([("src/a.py", 20, 0)]), headRefName="abc-2-export"))["branch"] == "abc-2-export"
+    assert [epic_key(x) for x in ("abc-1", "ABC_D-12")] == ["ABC-1", "ABC_D-12"]
+    assert all(dies(epic_key, x) for x in ("ABC-1 OR project = X", "ABC-1\n", "", "ABC", "A-1", "ÄBC-1", None))
+    assert clean("a\x1b[31mb\x07\x7f\x85c\ud800") == "a[31mbc"
+    assert jira_base(None) == "" and jira_base(" https://acme.atlassian.net/ ") == "https://acme.atlassian.net"
+    assert all(dies(jira_base, x) for x in ("http://acme.atlassian.net", "ftp://x", "acme.atlassian.net", "https://"))
+    meta = 'attributes:\n    0x00000007 <blob>="questlog-jira"\n    "acct"<blob>="me@example.com"\n    "cdat"<timedate>=0x3230\n'
+    assert basic_auth(meta, "tok") == "Basic " + base64.b64encode(b"me@example.com:tok").decode()
+    assert basic_auth(meta, "") is None and basic_auth("attributes:\n", "tok") is None
+
+    def issue(key, st="new"):
+        return {"key": key, "fields": {"summary": "Issue " + key, "status": {"statusCategory": {"key": st}}}}
+    pages = {None: {"issues": [issue("ABC-10"), issue("ABC-1"), issue("XYZ-3")], "isLast": False, "nextPageToken": "t2"},
+             "t2": {"issues": [issue("ABC-2", "done"), issue("ABC-9")], "isLast": True}}
+    urls = []
+
+    def get_page(url, auth):                                   # two pages, like Jira
+        urls.append(url)
+        return json.dumps(pages[urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("nextPageToken", [None])[0]])
+    top, kids = jira_pull("https://acme.example", "ABC-1", None, get_page)
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(urls[0]).query)
+    assert top["key"] == "ABC-1" and [k["key"] for k in kids] == ["ABC-2", "ABC-9", "ABC-10", "XYZ-3"] and kids[0]["status"] == "done"
+    assert len(urls) == 2 and urls[0].startswith("https://acme.example/rest/api/3/search/jql?")
+    assert q == {"jql": ["key = ABC-1 OR parent = ABC-1"], "fields": ["summary,status"], "maxResults": ["100"]}
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "c" / "jira.json"
+
+        def fails(exc):
+            def get(url, auth):
+                raise exc
+            return get
+
+        def http_err(code):
+            return fails(urllib.error.HTTPError("u", code, "x", {}, None))
+
+        def no_epic(url, auth):
+            return json.dumps({"issues": [issue("ABC-2")], "isLast": True})
+        assert dies(jira_load, path, "ABC-1", "https://acme.example", None, http_err(401))      # no saved copy yet
+        d, cached = jira_load(path, "ABC-1", "https://acme.example", None, get_page)
+        assert not cached and d["started"] == date.today().isoformat() and len(d["issues"]) == 4
+        path.write_text(json.dumps(dict(d, started="2026-09-01")))
+        assert jira_load(path, "ABC-1", "https://acme.example", None, get_page)[0]["started"] == "2026-09-01"
+        for get, msg in ((http_err(401), "Jira refused the request (HTTP 401). The token is missing, wrong or expired."),
+                         (http_err(403), "Jira refused the request (HTTP 403)."), (http_err(500), "Jira answered HTTP 500."),
+                         (fails(urllib.error.URLError("no route")), "Jira could not be reached (no route)."),
+                         (fails(TimeoutError("timed out")), "could not be reached (timed out)"), (lambda url, auth: "<html>", "cannot read"),
+                         (fails(http.client.IncompleteRead(b"")), "cannot read (IncompleteRead")):
+            with contextlib.redirect_stderr(io.StringIO()) as err:                             # the saved copy is used
+                d2, cached = jira_load(path, "ABC-1", "https://acme.example", None, get)
+            assert cached and d2["issues"] == d["issues"] and msg in err.getvalue(), (msg, err.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            assert jira_load(path, "ABC-1", "", None)[1] and "QUESTLOG_JIRA_URL" in err.getvalue()
+        assert dies(jira_load, path, "ABC-1", "https://acme.example", None, no_epic)             # the saved copy stays
+        assert jira_cache(path, "ABC-1")["started"] == "2026-09-01" and jira_cache(path, "ABC-2") is None
+
+    jira = {"epic": "ABC-1", "summary": "Export the audit log", "started": "2026-10-01", "read_at": "2026-10-14 09:02",
+            "issues": [{"key": f"ABC-{n}", "summary": t, "status": st} for n, t, st in (
+                (2, "Add the gate", "done"), (3, "Test the gate", "done"), (4, "Design the ledger", "done"),
+                (5, "Write the ledger rows", "new"), (6, "Add a CSV header", "new"))]}
+    plan = {"epic": "ABC-1", "chapters": [{"name": "The Gate", "issues": ["ABC-2", "ABC-3"]},
+                                          {"name": "The Ledger", "issues": ["ABC-4", "ABC-5"]}],
+            "traps": [{"area": "acme/api:db/migrations", "risk": "migration"}]}
+    assert plan_errors(plan, jira, Path("plan.json")) == []
+    chap = plan["chapters"]
+    for change, msg in ((dict(chapters=chap + [{"name": "X", "issues": ["ABC-9"]}]), "plan.json: chapter 3 names ABC-9, which"),
+                        (dict(chapters=chap + [{"name": "X", "issues": ["ABC-2"]}]), "plan.json: ABC-2 is in chapters 1 and 3"),
+                        (dict(chapters=[{"name": "X", "issues": ["ABC-1"]}]), "names ABC-1"),         # the epic is not a child
+                        (dict(epic="ABC-7"), "plan.json: epic is 'ABC-7', not 'ABC-1'"),
+                        (dict(chapters=chap + [{"name": " ", "issues": ["ABC-6"]}]), "chapter 3 needs a name"),
+                        (dict(chapters=chap + [{"name": "X", "issues": []}]), "chapter 3 needs a name and a list"),
+                        (dict(chapters=chap + [{"name": "X", "issues": [["ABC-6"]]}]), "chapter 3 names ['ABC-6']"),
+                        (dict(traps=[{"area": "acme/api"}]), "plan.json: trap 1 needs an area and a risk"),
+                        (dict(chapters=[]), "plan.json: expected"), (dict(chapters="x"), "plan.json: expected"), (dict(traps={}), "expected")):
+        errs = plan_errors(dict(plan, **change), jira, Path("plan.json"))
+        assert len(errs) == 1 and msg in errs[0], (msg, errs)
+    assert plan_errors([], jira, Path("plan.json"))[0].startswith("plan.json: expected")
+    assert "\x1b" not in plan_errors(dict(plan, chapters=[{"name": "X", "issues": ["\x1b]0;x\x07"]}]), jira, Path("plan.json"))[0]
+    prs = [{"ABC-2"}, {"ABC-2", "ABC-3"}, {"ABC-1", "ABC-4"}, {"ABC-1"}, set()]      # a PR counts once for a chapter
+    assert campaign_report(jira, False, plan, prs, D(2026, 10, 14)) == [
+        "CAMPAIGN ABC-1 Export the audit log | started 2026-10-01 (day 14) | Jira read 2026-10-14 09:02",
+        "Chapter 1 The Gate     done  2/2 issues  2 PRs", "Chapter 2 The Ledger   open  1/2 issues  1 PR",
+        "  ABC-5 new  Write the ledger rows", "Unplaced", "  ABC-6 new  Add a CSV header"]
+    r = campaign_report(jira, True, None, prs, D(2026, 10, 14))
+    assert r[0].endswith("09:02 (cache)") and r[1] == "No plan yet. Issues:" and r[2] == "  ABC-2 done  Add the gate" and len(r) == 7
+    plan["chapters"].append({"name": "The Rest", "issues": ["ABC-6"]})
+    assert "Unplaced" not in campaign_report(jira, False, plan, [], D(2026, 10, 14))
     print("ok")
 
 def main():
@@ -415,6 +705,8 @@ def main():
     c = sub.add_parser("chart", help="write chart.html: heatmap, cumulative XP and weekly bars")
     c.add_argument("--demo", action="store_true", help="draw a made-up season. Reads no GitHub data and no log")
     c.add_argument("--no-open", action="store_true", help="write the file and do not open it")
+    cp = sub.add_parser("campaign", help="read a Jira epic, link your PRs and print the campaign report")
+    cp.add_argument("epic", nargs="?", help="epic key such as ABC-1. It becomes the active campaign")
     lg = sub.add_parser("log", help="log a card, a check or an off day")
     lg.add_argument("kind", choices=["card", "check", "off"])
     lg.add_argument("--pr", help="owner/repo#n")
@@ -424,7 +716,7 @@ def main():
     lg.add_argument("--text")
     lg.add_argument("--own", action="store_true", help="the check is for your own PR")
     a = ap.parse_args()
-    {"status": cmd_status, "recap": cmd_recap, "chart": cmd_chart, "log": cmd_log, "selftest": selftest,
+    {"status": cmd_status, "recap": cmd_recap, "chart": cmd_chart, "campaign": cmd_campaign, "log": cmd_log, "selftest": selftest,
      "dir": lambda _: print(datadir())}[a.cmd](a)
 
 if __name__ == "__main__":
