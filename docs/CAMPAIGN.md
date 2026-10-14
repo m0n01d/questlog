@@ -1,6 +1,6 @@
 # Campaign mode
 
-Status: approved 2026-10-14. Steps 1 and 2 of the build order are built. Steps 3 to 7 are not.
+Status: approved 2026-10-14. Steps 1 to 3 of the build order are built. Steps 4 to 7 are not.
 
 Campaign mode adds a story to questlog. A Jira epic becomes a campaign, and Claude is the game master (the narrator and referee of a tabletop game). The own-PR gate becomes a skill check. When a chapter closes, a new bonus pays XP. All other XP rules stay the same.
 
@@ -53,7 +53,7 @@ XP for developer work is common. No tool that we found turns an epic into a camp
 - CC-BY-4.0 gives no trademark rights ([legal code](https://creativecommons.org/licenses/by/4.0/legalcode.en), section 2(b)(1)). "Dungeons & Dragons" and "D&D" are trademarks of Wizards of the Coast. Product text does not use them.
 - The nine monster names in the bestiary are in SRD 5.1 and in SRD 5.2. The name lists came from [Open5e](https://api.open5e.com) and [5e-bits/5e-database](https://github.com/5e-bits/5e-database), with 322 names for 5.1 and 331 for 5.2. "Illusion" is a plain word, not a monster.
 - Beholder, mind flayer, displacer beast, umber hulk and yuan-ti are not in the SRD ([SRD 5.1 legal text](https://github.com/BTMorton/dnd-5e-srd/blob/master/markdown/00%20legal.md)). questlog does not use them.
-- When the bestiary ships, the README gets the SRD 5.2.1 attribution statement. Copy it from the legal page of the official SRD 5.2.1. A community copy has the text, but we did not compare it with the official file.
+- The README has the SRD 5.2.1 attribution statement. We copied it on 2026-10-14 from page 1 of the official SRD 5.2.1 PDF.
 
 ### Jira Cloud
 
@@ -148,6 +148,7 @@ The script makes sure that each key is an issue of the epic, and that no key is 
 | Command | What it does |
 |---|---|
 | `campaign [EPIC]` | Reads Jira, links PRs, logs closed chapters and prints the campaign report. With EPIC, it also sets the active campaign. |
+| `campaign --pr REF` | Checks one PR against the active campaign. It reads the saved files only, with no Jira call and no season search. It prints a "Skill check" line, or "Not a skill check", and a "Trap" line for each trap that the PR touches. |
 | `log trophy --monster NAME --pr REF --at PATH:LINE` | Logs one trophy. A trophy pays no XP. |
 | `log check ... --wander` | Marks a check as the wandering monster of this week. |
 | `sheet` | Prints the character sheet. |
@@ -166,7 +167,7 @@ Unplaced
   ABC-6 new  Add a CSV header
 ```
 
-Day N is the days since the start, plus 1. Under an open chapter, the report lists its issues that are not done. When all the issues of a chapter are done, the chapter is done. PRs are your merged PRs of the season with a key of the chapter. With no plan, the report prints "No plan yet. Issues:" and every issue. If Jira cannot be read, the first line ends with "(cache)". Later steps add the XP of a closed chapter (step 4), the bestiary line (step 3) and the wandering monster (step 6).
+Day N is the days since the start, plus 1. Under an open chapter, the report lists its issues that are not done. When all the issues of a chapter are done, the chapter is done. PRs are your merged PRs of the season with a key of the chapter. With no plan, the report prints "No plan yet. Issues:" and every issue. If Jira cannot be read, the first line ends with "(cache)". Step 3 adds the bestiary line, for example `Bestiary: mimic 2, zombie 1`. The line counts the trophies of the epic. If the epic has no trophy, the report omits the line. Later steps add the XP of a closed chapter (step 4) and the wandering monster (step 6).
 
 ### Session zero
 

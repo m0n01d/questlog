@@ -182,7 +182,7 @@ On a machine with no display, add `--no-open`. Then open the file on another mac
 
 ## Campaign mode
 
-Campaign mode turns a Jira epic into a campaign. The `campaign` command reads the epic and its child issues from Jira. It links your merged PRs to the issues by the Jira key in the PR title or branch. Then it prints one report. In Claude Code, Claude plays the game master (the narrator and referee) and keeps a journal. The design is in [docs/CAMPAIGN.md](docs/CAMPAIGN.md). The skill checks and the XP bonus are not built yet.
+Campaign mode turns a Jira epic into a campaign. The `campaign` command reads the epic and its child issues from Jira. It links your merged PRs to the issues by the Jira key in the PR title or branch. Then it prints one report. In Claude Code, Claude plays the game master (the narrator and referee) and keeps a journal. The design is in [docs/CAMPAIGN.md](docs/CAMPAIGN.md). The skill checks are built. The XP bonus is not built yet.
 
 Campaign mode needs macOS, because the token lives in the Keychain. Set it up with these steps:
 
@@ -198,15 +198,41 @@ Campaign mode needs macOS, because the token lives in the Keychain. Set it up wi
 
 Then run `python3 ~/.claude/skills/questlog/questlog.py campaign ABC-1`. Without an epic key, the command uses the active campaign. If Jira cannot be reached, it prints the reason and uses the last saved read.
 
+Two more commands support the skill check:
+
+- `campaign --pr owner/repo#n` checks one PR against the active campaign. It reads the saved files and makes no Jira call. If the PR names an issue of the epic, it prints a "Skill check" line. It prints a "Trap" line for each trap that the PR touches.
+- `log trophy --monster NAME --pr owner/repo#n --at path:line` logs one finding of the AI-code checklist. A trophy pays no XP.
+
 In Claude Code, use these two commands:
 
 - `/questlog campaign start <epic>` runs session zero. Claude reads the issue summaries and proposes chapters and traps. After your yes, it writes `plan.json`.
 - `/questlog campaign` opens the day. Claude tells the story so far from the journal, names one goal, and adds the goal to the journal.
 
+If the PR names an issue of the epic, `/questlog own <pr>` runs a skill check. A boss PR gets 8 questions and all ten checklist items. A boss PR has a migration, auth or permissions, a money path, or a trap area.
+
+## Bestiary
+
+In a campaign, each fault in the AI-code checklist has a monster. When Claude finds a fault in your own PR, it runs `log trophy`. A trophy pays no XP, so an invented finding gains nothing. The campaign report counts the trophies of the epic, for example `Bestiary: mimic 2, zombie 1`.
+
+| # | Fault | Monster |
+|---|---|---|
+| 1 | An invented or misused API | mimic |
+| 2 | Logic that fails on an edge case | roper |
+| 3 | A test that restates the code or mocks away the behavior | illusion |
+| 4 | A deleted or weakened test or assertion | rust monster |
+| 5 | A swallowed error or a broad catch | invisible stalker |
+| 6 | A change that the task did not ask for | gelatinous cube |
+| 7 | A helper that duplicates one in the repo | doppelganger |
+| 8 | Dead code | zombie |
+| 9 | A hardcoded value or a secret | gargoyle |
+| 10 | Input that crosses a trust boundary without a check | vampire |
+
+This work includes material from the System Reference Document 5.2.1 (“SRD 5.2.1”) by Wizards of the Coast LLC, available at https://www.dndbeyond.com/srd. The SRD 5.2.1 is licensed under the Creative Commons Attribution 4.0 International License, available at https://creativecommons.org/licenses/by/4.0/legalcode.
+
 ## Data and privacy
 
 - The script keeps its data in `~/.claude/questlog/`. Set `QUESTLOG_DIR` to use another folder.
-- `log.jsonl` holds your cards, checks and off days. `state.json` holds the season, the level, the unlocked achievements and the active campaign.
+- `log.jsonl` holds your cards, checks, trophies and off days. `state.json` holds the season, the level, the unlocked achievements and the active campaign.
 - `rubric.md` holds the expected answers of the last review. The next review overwrites it.
 - `chart.html` holds the last chart.
 - `campaigns/<EPIC>/jira.json` holds the last Jira read: the epic summary, and the key, summary and status category of each child issue.

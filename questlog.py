@@ -33,6 +33,9 @@ PR_REF = re.compile(r"^(?:https?://[^/\s]+/)?([\w.-]+/[\w.-]+)(?:#|/pull/)(\d+)(
 FILES = "additions deletions changedFiles files(first:100){nodes{path additions deletions}}"
 KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]+-[0-9]+")    # a Jira key such as ABC-12
 CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\ud800-\udfff]")    # C0, DEL, C1 and lone surrogates
+AT_RE = re.compile(r"\s*(\S.*?)\s*:([0-9]+)\s*")        # PATH:LINE, split on the last colon
+MONSTERS = ["mimic", "roper", "illusion", "rust monster", "invisible stalker",    # one for each AI-code checklist item, in its order
+            "gelatinous cube", "doppelganger", "zombie", "gargoyle", "vampire"]
 
 def level(xp): return 1 + math.isqrt(xp // XP_PER_STEP)
 def title(lv): return TITLES[max(k for k in TITLES if k <= lv)]
@@ -160,6 +163,7 @@ def datadir():
     return d
 
 def read_local(path):
+    """The scoring events of log.jsonl. A kind that is not in the table below, such as trophy, is skipped and scores nothing."""
     out = []
     for ln in path.read_text(encoding="utf-8").splitlines() if path.exists() else []:
         try:
@@ -400,10 +404,64 @@ def status_campaign(old):
     plan, errs = plan_load(cdir / "plan.json", jira) if jira else (None, [])
     return [campaign_line(epic, jira, plan, errs)]
 
+def bestiary(path, epic):
+    """['Bestiary: mimic 2, zombie 1'] for the trophies of one campaign in log.jsonl, in checklist order. [] with none."""
+    n = Counter()
+    for ln in path.read_text(encoding="utf-8").splitlines() if path.exists() else []:
+        try:
+            r = json.loads(ln)
+            if r["kind"] == "trophy" and r.get("campaign") == epic:
+                n[r["monster"]] += 1
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+    got = [f"{m} {n[m]}" for m in MONSTERS if n[m]]
+    return ["Bestiary: " + ", ".join(got)] if got else []
+
+def in_area(repo, path, area):
+    """True if `path` of `repo` is the trap `area` (repo:dir) or lies inside it. The repo name ignores case."""
+    r, _, d = area.partition(":")
+    return r.lower() == repo.lower() and (path == d or path.startswith(d + "/"))
+
+def skill_check(ref, title, branch, paths, jira, plan):
+    """The lines of `campaign --pr`. `plan` is None for no plan. It links the way `campaign` does and makes no Jira call."""
+    keys = sorted(pr_keys(title, branch, {i["key"] for i in jira["issues"]} | {jira["epic"]}), key=key_order)
+    if not keys:
+        return [f"Not a skill check: {ref} names no issue of {jira['epic']}"]
+    ch = {k: f"chapter {n} {clean(c['name'])}" for n, c in enumerate(plan["chapters"], 1) for k in c["issues"]} if plan else {}
+    out = [f"Skill check: {ref} names " + ", ".join(f"{k} ({ch.get(k, 'unplaced' if plan else 'no plan')})" for k in keys)]
+    for t in (plan or {}).get("traps", []):
+        hit = next((p for p in paths if in_area(ref.partition("#")[0], p, t["area"])), None)
+        if hit:
+            out.append(f"Trap: {clean(t['area'])} ({clean(t['risk'])}) in {clean(hit)}")
+    return out
+
+def campaign_pr(pr, st):
+    """`campaign --pr`: check one PR against the active campaign. It reads the saved files and runs one `gh pr view`."""
+    ref = norm_ref(pr) or die("--pr must look like owner/repo#n or be a PR URL")
+    epic = epic_key(st["campaign"])
+    cdir = datadir() / "campaigns" / epic
+    jira = jira_cache(cdir / "jira.json", epic) or die(f"there is no saved Jira read of {epic}. Run: python3 questlog.py campaign")
+    plan, errs = plan_load(cdir / "plan.json", jira)
+    repo, num = ref.split("#")
+    r = gh("pr", "view", num, "--repo", repo, "--json", "title,headRefName,files")
+    try:
+        d = json.loads(r.stdout)
+        title, branch, paths = d["title"], d["headRefName"], [f["path"] for f in d["files"]]
+    except (ValueError, KeyError, TypeError):
+        die(f"gh could not read {ref}: " + ((r.stderr or r.stdout).strip().splitlines() or ["no detail"])[0])
+    if errs:
+        print("\n".join(errs), file=sys.stderr)
+    print("\n".join(skill_check(ref, title, branch, paths, jira, None if errs else plan)))
+    sys.exit(1 if errs else 0)
+
 def cmd_campaign(a):
     today, st = date.today(), load_state()
     if a.epic is None and not st.get("campaign"):
         die("there is no active campaign. Run: python3 questlog.py campaign ABC-1")
+    if a.pr and a.epic is not None:
+        die("--pr checks the active campaign, so leave out the epic")
+    if a.pr:
+        return campaign_pr(a.pr, st)
     epic = epic_key(st.get("campaign") if a.epic is None else a.epic)
     cdir, base = datadir() / "campaigns" / epic, jira_base(os.environ.get("QUESTLOG_JIRA_URL"))
     auth = jira_auth() if base else None
@@ -417,7 +475,7 @@ def cmd_campaign(a):
     prs = [pr_keys(e["title"], e["branch"], known) for e in collect(whoami(), s0) if e["kind"] == "merged" and ev_in(e, s0, today)]
     if errs:
         print("\n".join(errs), file=sys.stderr)
-    print("\n".join(campaign_report(jira, cached, None if errs else plan, prs, today)))
+    print("\n".join(campaign_report(jira, cached, None if errs else plan, prs, today) + bestiary(datadir() / "log.jsonl", epic)))
     sys.exit(1 if errs else 0)
 
 def cmd_log(a):
@@ -435,13 +493,23 @@ def cmd_log(a):
         die("a card needs --text")
     if a.kind == "check" and not (a.score is not None and a.of and 0 <= a.score <= a.of):
         die("a check needs --score N --of M, with 0 <= N <= M and M >= 1")
+    monster, at = " ".join((a.monster or "").lower().split()), AT_RE.fullmatch(clean(a.at or ""))
+    if a.kind == "trophy" and monster not in MONSTERS:
+        die("--monster must be one of: " + ", ".join(MONSTERS))
+    if a.kind == "trophy" and not (pr and at):
+        die("a trophy needs --pr owner/repo#n and --at PATH:LINE, with digits for the line")
     if a.kind != "off" and d > today:
-        die("a card or a check cannot have a future date")
+        die("a card, a check or a trophy cannot have a future date")
     rec = {"kind": a.kind, "date": d.isoformat(), "pr": pr, "text": text or None}
     if a.kind == "check":
         rec.update(score=a.score, of=a.of, own=a.own or None)
+    if a.kind == "trophy":
+        rec = dict(kind="trophy", date=d.isoformat(), monster=monster, pr=pr, at=f"{at[1]}:{at[2]}", campaign=load_state().get("campaign"))
     with open(datadir() / "log.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps({k: v for k, v in rec.items() if v is not None}) + "\n")
+    if a.kind == "trophy":
+        print(f"Trophy: {monster} at {rec['at']} ({pr})")
+        return
     s0, s1 = season_bounds(today)
     xp = {"card": XP_CARD, "check": XP_CHECK_POINT * (a.score or 0), "off": 0}[a.kind]
     print(f"Logged {a.kind} for {d}: +{xp} XP" + ("" if s0 <= d <= s1 else " (outside this season, not counted)")
@@ -732,6 +800,75 @@ def selftest(_=None):
         assert plan_load(pp, jira)[0] is None and "plan.json: cannot read the file" in plan_load(pp, jira)[1][0]
         pp.write_text(json.dumps(plan))
         assert plan_load(pp, jira) == (plan, [])
+    import unittest.mock
+    with tempfile.TemporaryDirectory() as td, unittest.mock.patch.dict(os.environ, {"QUESTLOG_DIR": td}):    # log trophy and the bestiary
+        lp, ok = Path(td) / "log.jsonl", dict(monster="mimic", pr="acme/api#7", at="src/pay.py:42")
+
+        def log(kind, **kw):
+            base = dict(kind=kind, date=None, text=None, own=False, score=None, of=None, pr=None, monster=None, at=None)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                cmd_log(argparse.Namespace(**{**base, **kw}))
+            return out.getvalue()
+
+        def refused(**kw): return dies(lambda: log("trophy", **{**ok, **kw}))
+        assert all(refused(monster=m) for m in ("beholder", "mimics", "", None))               # a name outside the list
+        assert all(refused(at=x) for x in ("src/pay.py", "src/pay.py:", "src/pay.py:4x", ":42", " :42", "", None))    # no line number
+        assert refused(pr=None) and refused(pr="web#1") and not lp.exists()                    # a refused trophy writes nothing
+        assert log("trophy", **ok) == "Trophy: mimic at src/pay.py:42 (acme/api#7)\n"
+        assert json.loads(lp.read_text()) == dict(kind="trophy", date=D.today().isoformat(), monster="mimic", pr="acme/api#7", at="src/pay.py:42")
+        for epic, name, at in (("ABC-1", " Doppelganger ", "old\x1b.py:9"), ("ABC-1", "mimic", "a:b:5"), ("ABC-1", "RUST  Monster", "t.py:1"),
+                               ("ABC-1", "mimic", "src/pay.py:42"), ("ABC-2", "roper", "x.py:3"), (None, "vampire", "y.py:4")):
+            (Path(td) / "state.json").write_text(json.dumps({"campaign": epic}))
+            log("trophy", monster=name, pr="acme/api#7", at=at)
+        recs = [json.loads(x) for x in lp.read_text().splitlines()]
+        assert recs[1]["at"] == "old.py:9" and recs[1]["monster"] == "doppelganger" and recs[2]["at"] == "a:b:5"    # split on the last colon
+        assert recs[1]["campaign"] == "ABC-1" and "campaign" not in recs[0] and "campaign" not in recs[-1]
+        assert bestiary(lp, "ABC-1") == ["Bestiary: mimic 2, rust monster 1, doppelganger 1"]       # checklist order, this campaign only
+        assert bestiary(lp, "ABC-2") == ["Bestiary: roper 1"] and bestiary(lp, "ABC-3") == []
+        log("card", text="x")
+        assert [e["kind"] for e in read_local(lp)] == ["card"] and tally(read_local(lp))["xp"] == XP_CARD    # a trophy pays no XP
+    area = "acme/api:db/migrations"
+    assert in_area("acme/api", "db/migrations/1.sql", area) and in_area("Acme/API", "db/migrations/x/y.sql", area) and in_area("acme/api", "db/migrations", area)
+    assert not any(in_area(r, p, area) for r, p in (("acme/web", "db/migrations/1.sql"), ("acme/api", "db/migrations2/x.sql"),
+                                                   ("acme/api", "xdb/migrations/1.sql"), ("acme/api", "db/migration")))
+    p2, pf = dict(plan, chapters=plan["chapters"][:2]), ["src/a.py", "db/migrations/0042_add.sql", "db/migrations/0043.sql"]    # ABC-6 is unplaced in p2
+    assert skill_check("acme/api#12", "Add rows", "abc-4-ledger", pf, jira, p2) == [
+        "Skill check: acme/api#12 names ABC-4 (chapter 2 The Ledger)",
+        "Trap: acme/api:db/migrations (migration) in db/migrations/0042_add.sql"]         # one line for a trap, with its first file
+    assert skill_check("acme/api#12", "ABC-6 then ABC-3, not UTF-8", "main", pf[:1], jira, p2) == [
+        "Skill check: acme/api#12 names ABC-3 (chapter 1 The Gate), ABC-6 (unplaced)"]
+    assert skill_check("acme/api#12", "ABC-4", "x", pf, jira, None) == ["Skill check: acme/api#12 names ABC-4 (no plan)"]
+    assert skill_check("acme/api#12", "Fix UTF-8 for XYZ-9", "main", pf, jira, p2) == ["Not a skill check: acme/api#12 names no issue of ABC-1"]
+    with tempfile.TemporaryDirectory() as td, unittest.mock.patch.dict(os.environ, {"QUESTLOG_DIR": td}):    # campaign --pr, with a fake gh
+        cdir, calls = Path(td) / "campaigns" / "ABC-1", []
+        cdir.mkdir(parents=True)
+        (cdir / "jira.json").write_text(json.dumps(jira))
+
+        def fake_gh(*args):
+            calls.append(args)
+            out = json.dumps({"title": "Add rows", "headRefName": "abc-4-ledger", "files": [{"path": "db/migrations/1.sql"}]})
+            return subprocess.CompletedProcess(args, 0, out, "") if args[2] == "12" else subprocess.CompletedProcess(args, 1, "", "no pull request found")
+
+        def pr_run(ref):
+            with unittest.mock.patch.object(sys.modules[__name__], "gh", fake_gh), contextlib.redirect_stdout(io.StringIO()) as out, \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                try:
+                    campaign_pr(ref, {"campaign": "abc-1"})
+                except SystemExit as e:
+                    return e.code, out.getvalue(), err.getvalue()
+        assert pr_run("https://github.com/acme/api/pull/12/files") == (0, "Skill check: acme/api#12 names ABC-4 (no plan)\n", "")
+        assert calls == [("pr", "view", "12", "--repo", "acme/api", "--json", "title,headRefName,files")]    # an argv list
+        (cdir / "plan.json").write_text(json.dumps(plan))
+        assert pr_run("acme/api#12") == (0, "Skill check: acme/api#12 names ABC-4 (chapter 2 The Ledger)\n"
+                                         "Trap: acme/api:db/migrations (migration) in db/migrations/1.sql\n", "")
+        (cdir / "plan.json").write_text(json.dumps(dict(plan, epic="ABC-7")))
+        code, out, err = pr_run("acme/api#12")                                                  # a bad plan: errors, exit 1, no traps
+        assert code == 1 and out == "Skill check: acme/api#12 names ABC-4 (no plan)\n" and "plan.json: epic is 'ABC-7'" in err
+        code, out, err = pr_run("acme/api#99")                                                  # gh fails
+        assert code == 1 and not out and "gh could not read acme/api#99: no pull request found" in err
+        assert pr_run("web#1")[0] == pr_run("")[0] == 1                                         # a bad ref
+        (cdir / "jira.json").unlink()
+        assert pr_run("acme/api#12")[0] == 1 and "no saved Jira read of ABC-1" in pr_run("acme/api#12")[2]
     print("ok")
 
 def main():
@@ -747,14 +884,17 @@ def main():
     c.add_argument("--no-open", action="store_true", help="write the file and do not open it")
     cp = sub.add_parser("campaign", help="read a Jira epic, link your PRs and print the campaign report")
     cp.add_argument("epic", nargs="?", help="epic key such as ABC-1. It becomes the active campaign")
-    lg = sub.add_parser("log", help="log a card, a check or an off day")
-    lg.add_argument("kind", choices=["card", "check", "off"])
+    cp.add_argument("--pr", help="owner/repo#n or a PR URL: check this PR against the active campaign, from the saved files")
+    lg = sub.add_parser("log", help="log a card, a check, a trophy or an off day")
+    lg.add_argument("kind", choices=["card", "check", "off", "trophy"])
     lg.add_argument("--pr", help="owner/repo#n")
     lg.add_argument("--score", type=int)
     lg.add_argument("--of", type=int)
     lg.add_argument("--date", help="YYYY-MM-DD, default today")
     lg.add_argument("--text")
     lg.add_argument("--own", action="store_true", help="the check is for your own PR")
+    lg.add_argument("--monster", help="trophy: " + ", ".join(MONSTERS))
+    lg.add_argument("--at", help="trophy: PATH:LINE of the finding")
     a = ap.parse_args()
     {"status": cmd_status, "recap": cmd_recap, "chart": cmd_chart, "campaign": cmd_campaign, "log": cmd_log, "selftest": selftest,
      "dir": lambda _: print(datadir())}[a.cmd](a)
