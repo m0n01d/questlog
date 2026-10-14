@@ -140,6 +140,7 @@ The script scores your work again on each run. The constants live at the top of 
 | Owned: the merged PR has an own check with a full score | +10 | `XP_OWNED` |
 | Review of a PR by someone else | 10 | `XP_REVIEWED` |
 | Learning card | 3 | `XP_CARD` |
+| Chapter closed in a campaign: each issue is done, and one of your merged PRs links to it | 25 | `XP_CHAPTER` |
 | Check: each point of the score | 2 | `XP_CHECK_POINT` |
 | Off day | 0 | none |
 
@@ -182,7 +183,7 @@ On a machine with no display, add `--no-open`. Then open the file on another mac
 
 ## Campaign mode
 
-Campaign mode turns a Jira epic into a campaign. The `campaign` command reads the epic and its child issues from Jira. It links your merged PRs to the issues by the Jira key in the PR title or branch. Then it prints one report. In Claude Code, Claude plays the game master (the narrator and referee) and keeps a journal. The design is in [docs/CAMPAIGN.md](docs/CAMPAIGN.md). The skill checks are built. The XP bonus is not built yet.
+Campaign mode turns a Jira epic into a campaign. The `campaign` command reads the epic and its child issues from Jira. It links your merged PRs to the issues by the Jira key in the PR title or branch. Then it prints one report. In Claude Code, Claude plays the game master (the narrator and referee) and keeps a journal. The design is in [docs/CAMPAIGN.md](docs/CAMPAIGN.md). The skill checks and the chapter XP are built. A chapter pays one time, and it does not count as a day for the streak.
 
 Campaign mode needs macOS, because the token lives in the Keychain. Set it up with these steps:
 

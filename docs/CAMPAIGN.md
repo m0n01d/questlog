@@ -1,6 +1,6 @@
 # Campaign mode
 
-Status: approved 2026-10-14. Steps 1 to 3 of the build order are built. Steps 4 to 7 are not.
+Status: approved 2026-10-14. Steps 1 to 4 of the build order are built. Steps 5 to 7 are not.
 
 Campaign mode adds a story to questlog. A Jira epic becomes a campaign, and Claude is the game master (the narrator and referee of a tabletop game). The own-PR gate becomes a skill check. When a chapter closes, a new bonus pays XP. All other XP rules stay the same.
 
@@ -156,18 +156,18 @@ The script makes sure that each key is an issue of the epic, and that no key is 
 
 The `status` command gets one line from `jira.json` and `plan.json`, with no Jira call: `Campaign ABC-1: chapter 2 of 3`. The other texts are `no Jira read yet`, `no plan yet` and `complete`.
 
-The campaign report looks like this sample. The names are made up. This is the real output of step 1.
+The campaign report looks like this sample. The names are made up. This is the real output of steps 1 and 4.
 
 ```
 CAMPAIGN ABC-1 Export the audit log | started 2026-10-01 (day 14) | Jira read 2026-10-14 09:02
-Chapter 1 The Gate     done  2/2 issues  2 PRs
+Chapter 1 The Gate     done  2/2 issues  2 PRs  +25 XP on 2026-10-14
 Chapter 2 The Ledger   open  1/2 issues  1 PR
   ABC-5 new  Write the ledger rows
 Unplaced
   ABC-6 new  Add a CSV header
 ```
 
-Day N is the days since the start, plus 1. Under an open chapter, the report lists its issues that are not done. When all the issues of a chapter are done, the chapter is done. PRs are your merged PRs of the season with a key of the chapter. With no plan, the report prints "No plan yet. Issues:" and every issue. If Jira cannot be read, the first line ends with "(cache)". Step 3 adds the bestiary line, for example `Bestiary: mimic 2, zombie 1`. The line counts the trophies of the epic. If the epic has no trophy, the report omits the line. Later steps add the XP of a closed chapter (step 4) and the wandering monster (step 6).
+Day N is the days since the start, plus 1. Under an open chapter, the report lists its issues that are not done. When all the issues of a chapter are done, the chapter is done. PRs are your merged PRs of the season with a key of the chapter. With no plan, the report prints "No plan yet. Issues:" and every issue. If Jira cannot be read, the first line ends with "(cache)". Step 3 adds the bestiary line, for example `Bestiary: mimic 2, zombie 1`. The line counts the trophies of the epic. If the epic has no trophy, the report omits the line. Step 4 adds the XP of a closed chapter. The chapter line ends with `+25 XP on` and the date of the event. A later step adds the wandering monster (step 6).
 
 ### Session zero
 
@@ -228,6 +228,8 @@ Each fault in the AI-code checklist has a monster. For each finding, Claude runs
 
 - If each issue in a chapter has the status category `done`, the chapter closes. The user must also have a merged PR that links to the chapter.
 - On the first `campaign` run that sees the close, the script logs a `chapter` event. The event pays `XP_CHAPTER`, which is 25 in this draft.
+- The XP counts on the date of the event.
+- A chapter event does not count as a day for the streak.
 - If an issue opens again later, the XP stays.
 
 ### Wandering monster
@@ -310,6 +312,7 @@ The proposed v0 is steps 1 to 4. Steps 5 to 7 come after v0 runs at work.
 - Session zero reads issue summaries only, not descriptions.
 - CHA counts from the time that the PR opened, not from the review request. A long draft makes CHA lower.
 - Campaign mode needs macOS for the Keychain. The rest of questlog works without it.
+- If `plan.json` renames a closed chapter, the chapter pays again.
 
 ## Answers
 
