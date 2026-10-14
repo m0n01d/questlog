@@ -239,8 +239,7 @@ If the user typed only `campaign`, follow these steps.
 2. Read the last entry of the journal. If the journal has no entry, use the report alone.
 3. Write "Previously on" in three to five sentences. Use only the journal and the report.
 4. Name one goal for today from the first open chapter. Add the goal to the journal.
-5. If the report shows a wandering monster, offer it.
-6. If every chapter in the report says done, tell the user that the campaign is complete. Offer the epilogue.
+5. If every chapter in the report says done, tell the user that the campaign is complete.
 
 ### Journal
 
@@ -249,7 +248,7 @@ The journal is `campaigns/<EPIC>/journal.md`. Get the data folder with the `dir`
 1. Get today's date with `date +%F`.
 2. If the file has no heading for today, add one at the end. If the file is missing, create it with that heading.
 3. After each campaign event, such as the plan or the goal of the day, add one line under today's heading.
-4. Add lines at the end of the file only. Never change an older line, and never rewrite the file.
+4. Add lines at the end of the file only. Keep every older line as it is.
 5. Write each line as one plain sentence about one event.
 
 This is an example of a journal.
