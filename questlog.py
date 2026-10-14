@@ -10,6 +10,7 @@ from pathlib import Path
 # ---- Tune these ---------------------------------------------------------------------------------
 XP_MERGED, XP_CLEAN, XP_TESTED, XP_REVIEWED = 10, 5, 5, 10   # per PR
 XP_CARD, XP_CHECK_POINT = 3, 2        # per card; per point of check score
+XP_OWNED = 10                         # bonus for a merged PR whose own check scored full marks
 CLEAN_MIN, CLEAN_MAX = 10, 400        # effective changed lines of a clean slice
 MAX_FILES = 100                       # above this many files, count the PR totals
 XP_PER_STEP = 25                      # level = 1 + isqrt(xp // XP_PER_STEP)
@@ -22,11 +23,13 @@ TEST_RE = re.compile(                 # paths that make a PR "tested"
     r"(^|/)(?i:tests?|spec|__tests__)/|(^|/)test_|_test\.|\.test\.|\.spec\.|Tests?\.")
 ACHIEVEMENTS = [                      # (name, what it counts, goal)
     ("Clean Slicer", "clean", 10), ("Test Pilot", "tested", 10), ("Second Pair of Eyes", "review", 20),
-    ("Scholar", "card", 15), ("Deep Diver", "perfect", 5), ("Cartographer", "areas", 25), ("Iron Streak", "best", 10)]
+    ("Scholar", "card", 15), ("Deep Diver", "perfect", 5), ("Cartographer", "areas", 25), ("Iron Streak", "best", 10),
+    ("Owner", "owned", 10)]
 GQL = ("query($q:String!,$type:SearchType!,$after:String){search(query:$q,type:$type,first:100,after:$after)"
        "{pageInfo{hasNextPage endCursor}nodes{...on PullRequest{%s}}}}")
 WARNED = []                           # warn once about partial GitHub errors
 PR = "number title url repository{nameWithOwner} "
+PR_REF = re.compile(r"^(?:https?://[^/\s]+/)?([\w.-]+/[\w.-]+)(?:#|/pull/)(\d+)(?:[/?#].*)?$")
 FILES = "additions deletions changedFiles files(first:100){nodes{path additions deletions}}"
 
 def level(xp): return 1 + math.isqrt(xp // XP_PER_STEP)
@@ -35,6 +38,12 @@ def to_next(xp): return XP_PER_STEP * level(xp) ** 2 - xp
 def local_date(ts): return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().date()
 def ev_in(e, lo, hi): return any(lo <= d <= hi for d in e["days"])
 def files(n): return (n.get("files") or {}).get("nodes") or []
+def ref(n): return f"{n['repository']['nameWithOwner']}#{n['number']}"
+
+def norm_ref(s):
+    """owner/repo#n from owner/repo#n or a PR URL. None for anything else."""
+    m = PR_REF.match((s or "").strip())
+    return f"{m[1]}#{m[2]}" if m else None
 
 def season_bounds(d):
     """First and last day of the calendar quarter that holds d."""
@@ -61,7 +70,7 @@ def areas(repo, paths):
 
 def pr_info(n):
     repo = n["repository"]["nameWithOwner"]
-    return dict(title=n["title"], url=n["url"], repo=repo, areas=areas(repo, [f["path"] for f in files(n)]))
+    return dict(title=n["title"], url=n["url"], repo=repo, ref=ref(n), areas=areas(repo, [f["path"] for f in files(n)]))
 
 def merged_event(n):
     lines = (n["additions"] + n["deletions"] if n["changedFiles"] > MAX_FILES
@@ -83,10 +92,23 @@ def tally(evs):
         t["xp"] += e["xp"]
         t["clean"] += bool(e.get("clean"))
         t["tested"] += bool(e.get("tested"))
+        t["owned"] += bool(e.get("owned"))
         t["perfect"] += e["kind"] == "check" and e["score"] == e["of"]
         seen.update(e.get("areas", ()))
     t["areas"] = len(seen)
     return t
+
+def own_refs(evs):
+    """Lower-case refs of PRs that have an own check with full marks."""
+    return {e["pr"].lower() for e in evs if e["kind"] == "check" and e.get("own") and e.get("pr") and e["score"] == e["of"]}
+
+def mark_owned(evs):
+    """A merged PR with a full-marks own check is owned. It earns XP_OWNED on top."""
+    full = own_refs(evs)
+    for e in evs:
+        if e["kind"] == "merged" and e["ref"].lower() in full:
+            e["owned"], e["xp"] = True, e["xp"] + XP_OWNED
+    return evs
 
 def datadir():
     d = Path(os.environ.get("QUESTLOG_DIR") or "~/.claude/questlog").expanduser()
@@ -153,8 +175,8 @@ def collect(who, start):
     merged = search(f"is:pr is:merged author:{who} merged:>={since}", PR + "mergedAt " + FILES)
     seen = search(f"is:pr reviewed-by:{who} -author:{who} updated:>={since}",
                   PR + FILES + " reviews(author:%s,first:50){nodes{submittedAt}}" % json.dumps(who))
-    return ([merged_event(n) for n in merged if n.get("mergedAt")]
-            + [e for n in seen for e in review_event(n, start)] + read_local(datadir() / "log.jsonl"))
+    return mark_owned([merged_event(n) for n in merged if n.get("mergedAt")]
+                      + [e for n in seen for e in review_event(n, start)] + read_local(datadir() / "log.jsonl"))
 
 def cmd_log(a):
     today = date.today()
@@ -162,21 +184,26 @@ def cmd_log(a):
         d = date.fromisoformat(a.date) if a.date else today
     except ValueError:
         die("--date must look like YYYY-MM-DD")
-    text = " ".join((a.text or "").split())
+    text, pr = " ".join((a.text or "").split()), norm_ref(a.pr)
+    if a.pr and not pr:
+        die("--pr must look like owner/repo#n or be a PR URL")
+    if a.own and not (a.kind == "check" and pr):
+        die("--own needs a check and --pr")
     if a.kind == "card" and not text:
         die("a card needs --text")
     if a.kind == "check" and not (a.score is not None and a.of and 0 <= a.score <= a.of):
         die("a check needs --score N --of M, with 0 <= N <= M and M >= 1")
     if a.kind != "off" and d > today:
         die("a card or a check cannot have a future date")
-    rec = {"kind": a.kind, "date": d.isoformat(), "pr": a.pr, "text": text or None}
+    rec = {"kind": a.kind, "date": d.isoformat(), "pr": pr, "text": text or None}
     if a.kind == "check":
-        rec.update(score=a.score, of=a.of)
+        rec.update(score=a.score, of=a.of, own=a.own or None)
     with open(datadir() / "log.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps({k: v for k, v in rec.items() if v is not None}) + "\n")
     s0, s1 = season_bounds(today)
     xp = {"card": XP_CARD, "check": XP_CHECK_POINT * (a.score or 0), "off": 0}[a.kind]
-    print(f"Logged {a.kind} for {d}: +{xp} XP" + ("" if s0 <= d <= s1 else " (outside this season, not counted)"))
+    print(f"Logged {a.kind} for {d}: +{xp} XP" + ("" if s0 <= d <= s1 else " (outside this season, not counted)")
+          + (f". Owned: +{XP_OWNED} XP when {pr} is merged" if a.own and a.score == a.of else ""))
 
 def cmd_status(_):
     today = date.today()
@@ -186,10 +213,12 @@ def cmd_status(_):
     evs = collect(who, s0)
     reqs = sorted(search(f"is:pr is:open review-requested:{who} archived:false", PR + "createdAt"),
                   key=lambda n: n["createdAt"])
+    mine = sorted(search(f"is:pr is:open author:{who} archived:false", PR + "createdAt"), key=lambda n: n["createdAt"])
     season = [e for e in evs if ev_in(e, s0, today)]
     week = [e for e in season if ev_in(e, today - timedelta(days=today.weekday()), today)]
     active = {d for e in season if e["kind"] != "off" for d in e["days"] if d <= today}
-    cur, best = streaks(active, {d for e in evs if e["kind"] == "off" for d in e["days"]}, s0, today)
+    off = {d for e in evs if e["kind"] == "off" for d in e["days"]}
+    cur, best = streaks(active, off, s0, today)
     ts, tw = tally(season), tally(week)
     ts["best"] = best
     xp, lv, st = ts["xp"], level(ts["xp"]), load_state()
@@ -202,17 +231,18 @@ def cmd_status(_):
     (datadir() / "state.json").write_text(json.dumps({"season": label, "level": lv, "unlocked": sorted(have)}))
 
     def cells(t):
-        return [f"{t['merged']} ({t['clean']} clean, {t['tested']} tested)", t["review"], t["card"], t["check"], t["areas"]]
+        return [f"{t['merged']} ({t['clean']} clean, {t['tested']} tested, owned {t['owned']})",
+                t["review"], t["card"], t["check"], t["areas"]]
     out += [f"QUESTLOG {label} | day {(today - s0).days + 1} of {(s1 - s0).days + 1}",
             f"Level {lv} {title(lv)} | {xp} XP | {to_next(xp)} XP to level {lv + 1}",
-            f"Workday streak: {cur} (best this season: {best})", f"{'':9}{'season':<28}this week"]
-    out += [f"{n:<9}{x!s:<28}{y}" for n, x, y in zip(("Merged", "Reviews", "Cards", "Checks", "Areas"), cells(ts), cells(tw))]
+            f"Workday streak: {cur} (best this season: {best})", f"{'':9}{'season':<34}this week"]
+    out += [f"{n:<9}{x!s:<34}{y}" for n, x, y in zip(("Merged", "Reviews", "Cards", "Checks", "Areas"), cells(ts), cells(tw))]
     out += ["Achievements"] + [f"[{'x' if n in have else ' '}] {n:<20} {min(ts[k], g)}/{g}" for n, k, g in ACHIEVEMENTS]
     others = [q for q, k in (("Ship one clean slice", "merged"), ("Write one learning card", "card"))
               if not any(e["kind"] == k and today in e["days"] for e in evs)]
-    quests = [f"Review {n['repository']['nameWithOwner']}#{n['number']} \"{n['title'][:50]}\" "
-              f"(PR is {(today - local_date(n['createdAt'])).days} days old)"
-              for n in reqs[:min(2, 3 - len(others))]] + others
+    own = [f"Own it before merge: {ref(n)} {n['title'][:50]}" for n in mine if ref(n).lower() not in own_refs(evs)][:2]
+    quests = (own + [f"Review {ref(n)} \"{n['title'][:50]}\" (PR is {(today - local_date(n['createdAt'])).days} days old)"
+                     for n in reqs[:2]] + others)[:4]
     out += ["Today's quests" + ("" if quests else ": all done")] + [f"{i}. {q}" for i, q in enumerate(quests, 1)]
     print("\n".join(out))
 
@@ -230,11 +260,11 @@ def cmd_recap(a):
         return "[%s](%s)" % (re.sub(r"([\[\]])", r"\\\1", e["title"]), e["url"])
     print("\n".join(
         [f"# Questlog recap: {lo} to {today}"]
-        + sec("Shipped", "merged", lambda e: f"- {link(e)} ({e['repo']}, {e['lines']} lines{', tested' if e['tested'] else ''})")
+        + sec("Shipped", "merged", lambda e: f"- {link(e)} ({e['repo']}, {e['lines']} lines{', tested' if e['tested'] else ''}{', owned' if e.get('owned') else ''})")
         + sec("Reviewed", "review", lambda e: f"- {link(e)} ({e['repo']})")
         + sec("Learned", "card", lambda e: f"- {e['text']}" + (f" ({e['pr']})" if e.get("pr") else ""))
         + ["", "## Numbers",
-           f"- {t['merged']} PRs merged ({t['clean']} clean slices, {t['tested']} with tests), "
+           f"- {t['merged']} PRs merged ({t['clean']} clean slices, {t['tested']} with tests, {t['owned']} owned), "
            f"{t['review']} PRs reviewed, {t['card']} cards, {t['check']} checks",
            f"- {t['xp']} XP in this window. Level now: {lv} {title(lv)} ({season_xp} XP this season)"]))
 
@@ -283,6 +313,15 @@ def selftest(_=None):
         (D(2026, 1, 1), D(2026, 3, 31)), (D(2026, 4, 1), D(2026, 6, 30)),
         (D(2026, 7, 1), D(2026, 9, 30)), (D(2026, 10, 1), D(2026, 12, 31))]
 
+    refs = ("acme/web#123", " https://github.com/acme/web/pull/123/files ", "https://ghe.example.com/a-b/c.d/pull/7?x=1", "web#1", "123", "", None)
+    assert [norm_ref(x) for x in refs] == ["acme/web#123", "acme/web#123", "a-b/c.d#7", None, None, None, None]
+    full = dict(kind="check", own=True, pr="Acme/Web#123", score=3, of=3)             # case does not matter
+    m1, m2 = merged_event(pr([("src/a.py", 20, 0)])), merged_event(dict(pr([("src/a.py", 20, 0)]), number=124))
+    mark_owned([m1, m2, full, dict(full, pr="acme/web#124", score=2)])                 # #124 has only 2 of 3
+    assert (m1.get("owned"), m1["xp"], m2.get("owned"), m2["xp"]) == (True, 15 + XP_OWNED, None, 15)
+    m3 = mark_owned([merged_event(pr([("src/a.py", 20, 0)])), dict(full, own=False)])[0]   # not an own check
+    assert not m3.get("owned") and tally([m1, m2, m3])["owned"] == 1
+
     seen = []
 
     def fake(*args):                                                       # ISSUE is rejected, two pages follow
@@ -310,6 +349,7 @@ def main():
     lg.add_argument("--of", type=int)
     lg.add_argument("--date", help="YYYY-MM-DD, default today")
     lg.add_argument("--text")
+    lg.add_argument("--own", action="store_true", help="the check is for your own PR")
     a = ap.parse_args()
     {"status": cmd_status, "recap": cmd_recap, "log": cmd_log, "selftest": selftest}[a.cmd](a)
 
