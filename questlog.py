@@ -64,6 +64,32 @@ def streaks(active, off, start, today):
         d += timedelta(days=1)
     return run, best
 
+def week_no(d, s0): return ((d - s0).days + s0.weekday()) // 7    # weeks start on Monday
+
+def weekly(evs, s0, today):
+    """One Counter per season week up to today: xp, owned PRs and the count of each event kind. An event counts on its first day."""
+    ws = [Counter() for _ in range(week_no(today, s0) + 1)]
+    for e in evs:
+        w = ws[week_no(min(e["days"]), s0)]
+        w["xp"] += e["xp"]
+        w[e["kind"]] += 1
+        w["owned"] += bool(e.get("owned"))
+    return ws
+
+def spark(vals):
+    """One block per value, scaled to the largest value. Zero is the lowest block."""
+    top = max(vals, default=0) or 1
+    return "".join("▁▂▃▄▅▆▇█"[(v * 7 + top // 2) // top] for v in vals)
+
+def recent(active, off, s0, today, n=10):
+    """■ for a workday with activity, □ for an empty one, oldest first. Off days and days before the season are skipped."""
+    days, d = [], today
+    while d >= s0 and len(days) < n:
+        if d.weekday() < 5 and d not in off:
+            days.append(d)
+        d -= timedelta(days=1)
+    return "".join("■" if d in active else "□" for d in reversed(days))
+
 def areas(repo, paths):
     """Distinct repo:dir1/dir2 areas. Directories only. Generated paths are skipped."""
     return sorted({repo + ":" + "/".join(p.split("/")[:-1][:2]) for p in paths if "/" in p and not SKIP_RE.search(p)})
@@ -235,7 +261,9 @@ def cmd_status(_):
                 t["review"], t["card"], t["check"], t["areas"]]
     out += [f"QUESTLOG {label} | day {(today - s0).days + 1} of {(s1 - s0).days + 1}",
             f"Level {lv} {title(lv)} | {xp} XP | {to_next(xp)} XP to level {lv + 1}",
-            f"Workday streak: {cur} (best this season: {best})", f"{'':9}{'season':<34}this week"]
+            f"Workday streak: {cur} (best this season: {best})",
+            "XP per week: " + spark([w["xp"] for w in weekly(season, s0, today)]),
+            "Last 10 workdays: " + recent(active, off, s0, today), f"{'':9}{'season':<34}this week"]
     out += [f"{n:<9}{x!s:<34}{y}" for n, x, y in zip(("Merged", "Reviews", "Cards", "Checks", "Areas"), cells(ts), cells(tw))]
     out += ["Achievements"] + [f"[{'x' if n in have else ' '}] {n:<20} {min(ts[k], g)}/{g}" for n, k, g in ACHIEVEMENTS]
     others = [q for q, k in (("Ship one clean slice", "merged"), ("Write one learning card", "card"))
@@ -312,6 +340,14 @@ def selftest(_=None):
     assert [season_bounds(D(2026, m, 15)) for m in (2, 5, 8, 12)] == [
         (D(2026, 1, 1), D(2026, 3, 31)), (D(2026, 4, 1), D(2026, 6, 30)),
         (D(2026, 7, 1), D(2026, 9, 30)), (D(2026, 10, 1), D(2026, 12, 31))]
+
+    assert spark([0, 1, 2, 4, 8]) == "▁▂▃▅█" and spark([0, 0]) == "▁▁" and spark([]) == ""
+    act = {D(2026, 10, n) for n in (1, 8, 9, 12, 14)}
+    assert recent(act, set(), s0, wed) == "■□□□□■■■□■"                    # 10 workdays, oldest first
+    assert recent(act, {D(2026, 10, 13)}, s0, wed) == "■□□□□■■■■"         # an off day is skipped, and so is Sept 30
+    w = weekly([dict(kind="merged", days=[wed], xp=20, owned=True), dict(kind="review", days=[s0, wed], xp=10)], s0, wed)
+    assert [(x["xp"], x["merged"], x["review"], x["owned"]) for x in w] == [(10, 0, 1, 0), (0, 0, 0, 0), (20, 1, 0, 1)]
+    assert [week_no(x, s0) for x in (s0, D(2026, 10, 4), D(2026, 10, 5), D(2026, 12, 31))] == [0, 0, 1, 13]
 
     refs = ("acme/web#123", " https://github.com/acme/web/pull/123/files ", "https://ghe.example.com/a-b/c.d/pull/7?x=1", "web#1", "123", "", None)
     assert [norm_ref(x) for x in refs] == ["acme/web#123", "acme/web#123", "a-b/c.d#7", None, None, None, None]
