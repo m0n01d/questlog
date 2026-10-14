@@ -285,23 +285,28 @@ def key_order(k):
     proj, _, num = k.rpartition("-")
     return proj, int(num)
 
-def jira_pull(base, epic, auth, get):
-    """(the epic issue or None, its child issues by project and number). One GET for each page, 50 pages at most."""
+def jira_search(base, jql, fields, auth, get):
+    """The raw issues that match `jql`. One GET for each page, 50 pages at most."""
     raw, tok = [], None
     for _ in range(50):
-        q = {"jql": f"key = {epic} OR parent = {epic}", "fields": "summary,status", "maxResults": 100}
+        q = {"jql": jql, "fields": fields, "maxResults": 100}
         if tok:
             q["nextPageToken"] = tok
         page = json.loads(get(f"{base}/rest/api/3/search/jql?" + urllib.parse.urlencode(q), auth))
         raw += page["issues"]
         if page["isLast"]:
-            break
+            return raw
         tok = page["nextPageToken"]
-    else:
-        raise ValueError("more than 50 pages")
-    rows = [jira_issue(i) for i in raw]
+    raise ValueError("more than 50 pages")
+
+def jira_pull(base, epic, auth, get):
+    """(the epic issue or None, its child issues by project and number, {subtask key: child key}).
+    The subtasks let a PR that names only a subtask key link to its child issue."""
+    rows = [jira_issue(i) for i in jira_search(base, f"key = {epic} OR parent = {epic}", "summary,status", auth, get)]
     kids = sorted((r for r in rows if r["key"] != epic), key=lambda r: key_order(r["key"]))
-    return next((r for r in rows if r["key"] == epic), None), kids
+    top = next((r for r in rows if r["key"] == epic), None)
+    subs = jira_search(base, f"parent in ({', '.join(r['key'] for r in kids)})", "parent", auth, get) if top and kids else []
+    return top, kids, {clean(s["key"]): clean(s["fields"]["parent"]["key"]) for s in subs}
 
 def jira_cache(path, epic):
     """The saved jira.json as a dict, or None if it is missing or does not look right."""
@@ -318,7 +323,7 @@ def jira_load(path, epic, base, auth, get=http_get):
     old, why = jira_cache(path, epic), "QUESTLOG_JIRA_URL is not set, so questlog did not read Jira."
     if base:
         try:
-            top, kids = jira_pull(base, epic, auth, get)
+            top, kids, subs = jira_pull(base, epic, auth, get)
             why = None
         except urllib.error.HTTPError as e:
             why = (f"Jira refused the request (HTTP {e.code}). The token is missing, wrong or expired." if e.code in (401, 403)
@@ -335,7 +340,7 @@ def jira_load(path, epic, base, auth, get=http_get):
     if not top:
         die(f"{epic} is not in Jira, or this account cannot see it.")
     data = {"epic": epic, "summary": top["summary"], "started": old["started"] if old else date.today().isoformat(),
-            "read_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "issues": kids}
+            "read_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "issues": kids, "subtasks": subs}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=1), encoding="utf-8")
     return data, False
@@ -459,9 +464,14 @@ def in_area(repo, path, area):
     r, _, d = area.partition(":")
     return r.lower() == repo.lower() and (path == d or path.startswith(d + "/"))
 
+def campaign_keys(title, branch, jira):
+    """The keys of the epic and its child issues that a PR names. A subtask key counts for its child issue."""
+    subs = jira.get("subtasks", {})                                # a jira.json saved before subtasks has none
+    return {subs.get(k, k) for k in pr_keys(title, branch, {i["key"] for i in jira["issues"]} | {jira["epic"]} | set(subs))}
+
 def skill_check(ref, title, branch, paths, jira, plan):
     """The lines of `campaign --pr`. `plan` is None for no plan. It links the way `campaign` does and makes no Jira call."""
-    keys = sorted(pr_keys(title, branch, {i["key"] for i in jira["issues"]} | {jira["epic"]}), key=key_order)
+    keys = sorted(campaign_keys(title, branch, jira), key=key_order)
     if not keys:
         return [f"Not a skill check: {ref} names no issue of {jira['epic']}"]
     ch = {k: f"chapter {n} {clean(c['name'])}" for n, c in enumerate(plan["chapters"], 1) for k in c["issues"]} if plan else {}
@@ -508,8 +518,8 @@ def cmd_campaign(a):
     if a.epic is not None:
         (datadir() / "state.json").write_text(json.dumps({**st, "campaign": epic}))
     plan, errs = plan_load(cdir / "plan.json", jira)
-    s0, known = season_bounds(today)[0], {i["key"] for i in jira["issues"]} | {epic}
-    prs = [pr_keys(e["title"], e["branch"], known) for e in collect(whoami(), s0) if e["kind"] == "merged" and ev_in(e, s0, today)]
+    s0 = season_bounds(today)[0]
+    prs = [campaign_keys(e["title"], e["branch"], jira) for e in collect(whoami(), s0) if e["kind"] == "merged" and ev_in(e, s0, today)]
     if errs:
         print("\n".join(errs), file=sys.stderr)
     plan, lp = None if errs else plan, datadir() / "log.jsonl"
@@ -764,14 +774,18 @@ def selftest(_=None):
              "t2": {"issues": [issue("ABC-2", "done"), issue("ABC-9")], "isLast": True}}
     urls = []
 
-    def get_page(url, auth):                                   # two pages, like Jira
+    def get_page(url, auth):                                   # two pages, like Jira, then one page of subtasks
         urls.append(url)
-        return json.dumps(pages[urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("nextPageToken", [None])[0]])
-    top, kids = jira_pull("https://acme.example", "ABC-1", None, get_page)
-    q = urllib.parse.parse_qs(urllib.parse.urlparse(urls[0]).query)
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        if q["jql"][0].startswith("parent in"):
+            return json.dumps({"issues": [{"key": "ABC-21", "fields": {"parent": {"key": "ABC-2"}}}], "isLast": True})
+        return json.dumps(pages[q.get("nextPageToken", [None])[0]])
+    top, kids, subs = jira_pull("https://acme.example", "ABC-1", None, get_page)
+    q, q3 = (urllib.parse.parse_qs(urllib.parse.urlparse(u).query) for u in (urls[0], urls[2]))
     assert top["key"] == "ABC-1" and [k["key"] for k in kids] == ["ABC-2", "ABC-9", "ABC-10", "XYZ-3"] and kids[0]["status"] == "done"
-    assert len(urls) == 2 and urls[0].startswith("https://acme.example/rest/api/3/search/jql?")
+    assert len(urls) == 3 and urls[0].startswith("https://acme.example/rest/api/3/search/jql?")
     assert q == {"jql": ["key = ABC-1 OR parent = ABC-1"], "fields": ["summary,status"], "maxResults": ["100"]}
+    assert q3["jql"] == ["parent in (ABC-2, ABC-9, ABC-10, XYZ-3)"] and q3["fields"] == ["parent"] and subs == {"ABC-21": "ABC-2"}
 
     import tempfile
     with tempfile.TemporaryDirectory() as td:
@@ -901,6 +915,9 @@ def selftest(_=None):
     assert skill_check("acme/api#12", "ABC-6 then ABC-3, not UTF-8", "main", pf[:1], jira, p2) == [
         "Skill check: acme/api#12 names ABC-3 (chapter 1 The Gate), ABC-6 (unplaced)"]
     assert skill_check("acme/api#12", "ABC-4", "x", pf, jira, None) == ["Skill check: acme/api#12 names ABC-4 (no plan)"]
+    assert skill_check("acme/api#12", "[ABC-41] Add rows", "ABC-41", pf[:1], dict(jira, subtasks={"ABC-41": "ABC-4"}), p2) == [
+        "Skill check: acme/api#12 names ABC-4 (chapter 2 The Ledger)"]                   # a subtask key links to its child issue
+    assert campaign_keys("[ABC-41] Add rows", "ABC-41", jira) == set()                    # a jira.json saved before subtasks
     assert skill_check("acme/api#12", "Fix UTF-8 for XYZ-9", "main", pf, jira, p2) == ["Not a skill check: acme/api#12 names no issue of ABC-1"]
     with tempfile.TemporaryDirectory() as td, unittest.mock.patch.dict(os.environ, {"QUESTLOG_DIR": td}):    # campaign --pr, with a fake gh
         cdir, calls = Path(td) / "campaigns" / "ABC-1", []

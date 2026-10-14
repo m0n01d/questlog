@@ -125,7 +125,7 @@ The data folder gets one folder for each campaign, `campaigns/<EPIC>/`:
 
 | File | Writer | Content |
 |---|---|---|
-| `jira.json` | Script | The epic summary, the start date, the last issue list (key, summary, status category) and the date of the read |
+| `jira.json` | Script | The epic summary, the start date, the last issue list (key, summary, status category), the subtask of each child issue and the date of the read |
 | `plan.json` | Claude, after the user says yes | The chapters (name and issue keys) and the traps (area and risk) |
 | `journal.md` | Claude | One dated entry for each day. Claude only adds lines at the end. |
 | `epilogue.md` | Claude | The brag doc at the end of the campaign |
@@ -308,7 +308,6 @@ The proposed v0 is steps 1 to 4. Steps 5 to 7 come after v0 runs at work.
 ## Known gaps
 
 - A PR merged before the season start does not link. `campaign` reads the merged PRs of the current quarter only.
-- If a PR names only a subtask key, it does not link in v0. If the team puts subtask keys in PR titles, add subtasks.
 - Session zero reads issue summaries only, not descriptions.
 - CHA counts from the time that the PR opened, not from the review request. A long draft makes CHA lower.
 - Campaign mode needs macOS for the Keychain. The rest of questlog works without it.
