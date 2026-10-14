@@ -21,7 +21,10 @@ These rules apply to every section.
 - Call the script only as `python3 ~/.claude/skills/questlog/questlog.py`.
 - Never compute, round or change a number that the script prints.
 - Never edit `log.jsonl` or `state.json` in the data folder. Use the `log` command.
-- You write only these files in the data folder: `rubric.md` in the `review` section, and `campaigns/<EPIC>/plan.json` and `journal.md` in the `campaign` section.
+- You write only these files in the data folder:
+  - `rubric.md`, in the `review` section.
+  - `campaigns/<EPIC>/plan.json`, in the `campaign` section.
+  - `campaigns/<EPIC>/journal.md`, in the `campaign` and `review` sections.
 - Run `python3 ~/.claude/skills/questlog/questlog.py dir` to get the data folder. Do not guess it, because `QUESTLOG_DIR` can move it.
 - Quote every text argument in single quotes, so that the shell cannot expand it.
 - Never post, comment, push, merge or open a PR without a clear yes from the user in chat. This covers `gh pr create` and `gh pr ready`.
@@ -63,7 +66,7 @@ If the user wants to review, understand or self-review a PR, use this section. A
 ### Set up
 
 1. Turn `<pr>` into a `gh` target. For `owner/repo#n`, use `n --repo owner/repo`. A URL or a bare number works as it is.
-2. Fetch the PR with `gh pr view <target> --json title,body,author,baseRefName,isDraft,additions,deletions,changedFiles,files` and `gh pr diff <target>`.
+2. Fetch the PR with `gh pr view <target> --json title,body,author,baseRefName,headRefName,isDraft,additions,deletions,changedFiles,files` and `gh pr diff <target>`.
 3. If the diff is very large, read the file list first. Then read only the key files.
 4. Run `gh api user --jq .login`. If the login equals the PR author, ignoring case, the PR is the user's own PR.
 5. For an own PR, pick the questions under "Own PR". For any other PR, pick the questions under "Someone else's PR".
@@ -73,6 +76,19 @@ If the user wants to review, understand or self-review a PR, use this section. A
 Choose three questions. Ask about intent, about one behavior, and about risk. Each question names a file or a function, and the diff supports its answer.
 
 ### Own PR
+
+A skill check is an own check in a campaign. Before you pick the questions, follow these steps.
+
+1. Run `python3 ~/.claude/skills/questlog/questlog.py status`. If the output has no Campaign line, go to the questions below.
+2. Run `python3 ~/.claude/skills/questlog/questlog.py campaign --pr owner/repo#n`. The script reads the saved files and makes no Jira call.
+3. If the script prints a plan.json error, correct the file as the `campaign` section says. Then run the command again.
+4. If the script prints "Not a skill check", go to the questions below.
+5. If the script prints "Skill check", pick the tier. The tier sets the number of questions, in place of the counts below:
+   - Small slice: fewer than 3 logic files and no boss path. Ask 3 questions. The checklist reports findings only, as today.
+   - Standard: 3 to 8 logic files and no boss path. Ask one question for each logic file, as today. The checklist reports findings only.
+   - Boss: a migration, auth or permissions, a money path, or a Trap line. Ask 8 questions. Ask more than one question about the largest files.
+   - In a boss PR, the checklist reports all ten items. Each item is "clear" or a finding with file:line.
+   - A boss PR with more than 8 logic files is still "too big to own in one pass".
 
 Ask one question for each file that has logic. A file with a branch, a loop, a parse, state or a call to another system has logic. Test files, docs, lockfiles, generated files and plain data do not count.
 
@@ -109,7 +125,7 @@ Before you ask anything, write the expected answers. Do this for every PR.
 
 ### Run the AI-code checklist
 
-AI-written code can look right and hide faults. After you grade, read the whole diff again. Look for these ten faults:
+AI-written code can look right and hide faults. After you grade, read the whole diff again. Look for these ten faults. The bestiary below gives each fault a monster:
 
 1. An invented or misused API. Make sure that each new call exists with that signature. Read the source or the docs.
 2. Logic that seems right and fails on an edge case. Try empty, zero, one, many and bad input.
@@ -123,6 +139,37 @@ AI-written code can look right and hide faults. After you grade, read the whole 
 10. Input that crosses a trust boundary without a check.
 
 Report each finding with file:line. A note needs a file:line too. Mark each finding as a blocker or a note. A blocker can break behavior, leak a secret, hide a failure or let bad input in. If the diff has no finding, say "none found".
+
+In a boss skill check, report all ten items in order. Write "clear" for an item with no fault. Write the finding and its file:line for any other item.
+
+### Bestiary
+
+In a skill check, each checklist item has a monster. A trophy marks one finding. It pays no XP.
+
+| Item | Fault | Monster |
+|---|---|---|
+| 1 | An invented or misused API | mimic |
+| 2 | Logic that fails on an edge case | roper |
+| 3 | A test that restates the code or mocks away the behavior | illusion |
+| 4 | A deleted or weakened test or assertion | rust monster |
+| 5 | A swallowed error or a broad catch | invisible stalker |
+| 6 | A change that the task did not ask for | gelatinous cube |
+| 7 | A helper that duplicates one in the repo | doppelganger |
+| 8 | Dead code | zombie |
+| 9 | A hardcoded value or a secret | gargoyle |
+| 10 | Input that crosses a trust boundary without a check | vampire |
+
+After the checklist of a skill check, follow these steps:
+
+1. For each finding, run this command with the monster of its item. A blocker and a note both count.
+
+   ```sh
+   python3 ~/.claude/skills/questlog/questlog.py log trophy --monster '<monster>' --pr owner/repo#n --at 'path:line'
+   ```
+
+2. Never log a trophy for a "clear" item.
+3. If a path holds a single quote, do not run the command. Tell the user.
+4. Keep monster names out of review comments, PR text and Jira text.
 
 ### Close someone else's PR
 
@@ -149,11 +196,15 @@ Report each finding with file:line. A note needs a file:line too. Mark each find
    python3 ~/.claude/skills/questlog/questlog.py log check --pr owner/repo#n --score N --of M --own --text 'one-line summary'
    ```
 
-9. Ask the user to run the tests and to run the changed path by hand. Do not run them for the user.
-10. If the PR is a draft and it is owned, offer `gh pr ready <target>`. Run it only after a clear yes.
-11. For the next PR, suggest this flow: `gh pr create --draft`, own the draft with this skill, then `gh pr ready`. Run each command only after a clear yes.
-12. Ask for one learning card, as in the other flow.
-13. If the user says skip at any point, go straight to the findings. Log no check.
+9. If the check is a skill check, close the story after the verdict:
+   - Tell the result in one line, as the game master. Use only the verdict, the score and the trophies.
+   - Add one line to the journal, as the "Journal" section says. Take the epic key from the Campaign line of `status`.
+   - Review comments never use game words.
+10. Ask the user to run the tests and to run the changed path by hand. Do not run them for the user.
+11. If the PR is a draft and it is owned, offer `gh pr ready <target>`. Run it only after a clear yes.
+12. For the next PR, suggest this flow: `gh pr create --draft`, own the draft with this skill, then `gh pr ready`. Run each command only after a clear yes.
+13. Ask for one learning card, as in the other flow.
+14. If the user says skip at any point, go straight to the findings. Log no check.
 
 If the user gave a URL, still log the PR as `owner/repo#n`.
 
