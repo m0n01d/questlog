@@ -183,7 +183,7 @@ On a machine with no display, add `--no-open`. Then open the file on another mac
 
 ## Campaign mode
 
-Campaign mode turns a Jira epic into a campaign. The `campaign` command reads the epic and its child issues from Jira. It links your merged PRs to the issues by the Jira key in the PR title or branch. Then it prints one report. In Claude Code, Claude plays the game master (the narrator and referee) and keeps a journal. The design is in [docs/CAMPAIGN.md](docs/CAMPAIGN.md). The skill checks and the chapter XP are built. A chapter pays one time, and it does not count as a day for the streak.
+Campaign mode turns a Jira epic into a campaign. The `campaign` command reads the epic and its child issues from Jira. It links your merged PRs to the issues by the Jira key in the PR title or branch. A subtask key links to the child issue that holds the subtask. Then it prints one report. In Claude Code, Claude plays the game master (the narrator and referee) and keeps a journal. The design is in [docs/CAMPAIGN.md](docs/CAMPAIGN.md). The skill checks and the chapter XP are built. A chapter pays one time, and it does not count as a day for the streak.
 
 Campaign mode needs macOS, because the token lives in the Keychain. Set it up with these steps:
 
@@ -236,7 +236,7 @@ This work includes material from the System Reference Document 5.2.1 (“SRD 5.2
 - `log.jsonl` holds your cards, checks, trophies, closed chapters and off days. `state.json` holds the season, the level, the unlocked achievements and the active campaign.
 - `rubric.md` holds the expected answers of the last review. The next review overwrites it.
 - `chart.html` holds the last chart.
-- `campaigns/<EPIC>/jira.json` holds the last Jira read: the epic summary, and the key, summary and status category of each child issue.
+- `campaigns/<EPIC>/jira.json` holds the last Jira read: the epic summary, and the key, summary and status category of each child issue, and the subtasks of each child issue.
 - `campaigns/<EPIC>/plan.json` holds the chapters and the traps. `campaigns/<EPIC>/journal.md` holds the story journal. Claude writes both files. Claude only adds lines to the journal.
 - If you say yes to a recap append, Claude writes the recap to `brag.md`.
 - The script talks to GitHub through `gh`. In campaign mode it also sends GET requests to your Jira site, and to nothing else. It has no telemetry.
