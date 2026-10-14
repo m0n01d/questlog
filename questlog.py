@@ -59,7 +59,8 @@ def epic_key(s):
 
 def pr_keys(pr_title, branch, known):
     """Keys in `known` that a PR names in its title or branch. Other matches, such as UTF-8, link nothing."""
-    return {k.upper() for k in KEY_RE.findall(pr_title + " " + branch)} & known
+    found = {k.upper() for k in KEY_RE.findall(pr_title + " " + branch)}
+    return {k.split("_", i)[-1] for k in found for i in range(k.count("_") + 1)} & known   # fix_abc-2 names ABC-2
 
 def season_bounds(d):
     """First and last day of the calendar quarter that holds d."""
@@ -334,7 +335,7 @@ def plan_errors(plan, jira, path):
             continue
         for k in c["issues"]:
             if not isinstance(k, str) or k not in known:
-                errs.append(p + f"chapter {n} names {k}, which is not an issue of the epic")
+                errs.append(p + f"chapter {n} names {clean(k)}, which is not an issue of the epic")
             elif k in seen:
                 errs.append(p + f"{k} is in chapters {seen[k]} and {n}")
             else:
@@ -370,7 +371,10 @@ def cmd_campaign(a):
         die("there is no active campaign. Run: python3 questlog.py campaign ABC-1")
     epic = epic_key(st.get("campaign") if a.epic is None else a.epic)
     cdir, base = datadir() / "campaigns" / epic, jira_base(os.environ.get("QUESTLOG_JIRA_URL"))
-    jira, cached = jira_load(cdir / "jira.json", epic, base, jira_auth() if base else None)
+    auth = jira_auth() if base else None
+    if base and not auth:
+        print("questlog: the Keychain item questlog-jira gave no token, so the Jira request has no auth.", file=sys.stderr)
+    jira, cached = jira_load(cdir / "jira.json", epic, base, auth)
     if a.epic is not None:
         (datadir() / "state.json").write_text(json.dumps({**st, "campaign": epic}))
     plan, errs, pp = None, [], cdir / "plan.json"
@@ -599,6 +603,7 @@ def selftest(_=None):
     assert pr_keys("Fix UTF-8 and XYZ-9", "fix-utf-8", known) == set()               # not an issue of the epic
     assert pr_keys("Export", "abc-2-export", known) == {"ABC-2"}                      # a branch links, in lower case
     assert pr_keys("[abc-3] Gate ABC-1", "main", known) == {"ABC-1", "ABC-3"}
+    assert pr_keys("Export", "fix_abc-2-export", known) == {"ABC-2"}                  # a prefix joined by _
     assert merged_event(dict(pr([("src/a.py", 20, 0)]), headRefName="abc-2-export"))["branch"] == "abc-2-export"
     assert [epic_key(x) for x in ("abc-1", "ABC_D-12")] == ["ABC-1", "ABC_D-12"]
     assert all(dies(epic_key, x) for x in ("ABC-1 OR project = X", "ABC-1\n", "", "ABC", "A-1", "ÄBC-1", None))
@@ -677,6 +682,7 @@ def selftest(_=None):
         errs = plan_errors(dict(plan, **change), jira, Path("plan.json"))
         assert len(errs) == 1 and msg in errs[0], (msg, errs)
     assert plan_errors([], jira, Path("plan.json"))[0].startswith("plan.json: expected")
+    assert "\x1b" not in plan_errors(dict(plan, chapters=[{"name": "X", "issues": ["\x1b]0;x\x07"]}]), jira, Path("plan.json"))[0]
     prs = [{"ABC-2"}, {"ABC-2", "ABC-3"}, {"ABC-1", "ABC-4"}, {"ABC-1"}, set()]      # a PR counts once for a chapter
     assert campaign_report(jira, False, plan, prs, D(2026, 10, 14)) == [
         "CAMPAIGN ABC-1 Export the audit log | started 2026-10-01 (day 14) | Jira read 2026-10-14 09:02",
