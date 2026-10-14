@@ -229,7 +229,8 @@ def cmd_log(a):
     s0, s1 = season_bounds(today)
     xp = {"card": XP_CARD, "check": XP_CHECK_POINT * (a.score or 0), "off": 0}[a.kind]
     print(f"Logged {a.kind} for {d}: +{xp} XP" + ("" if s0 <= d <= s1 else " (outside this season, not counted)")
-          + (f". Owned: +{XP_OWNED} XP when {pr} is merged" if a.own and a.score == a.of else ""))
+          + (f". Owned check saved for {pr}. Status adds the +{XP_OWNED} XP owned bonus for a PR merged this season."
+             if a.own and a.score == a.of else ""))
 
 def cmd_status(_):
     today = date.today()
