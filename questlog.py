@@ -11,6 +11,7 @@ from pathlib import Path
 XP_MERGED, XP_CLEAN, XP_TESTED, XP_REVIEWED = 10, 5, 5, 10   # per PR
 XP_CARD, XP_CHECK_POINT = 3, 2        # per card; per point of check score
 XP_OWNED = 10                         # bonus for a merged PR whose own check scored full marks
+XP_CHAPTER = 25                       # per chapter closed in a campaign
 CLEAN_MIN, CLEAN_MAX = 10, 400        # effective changed lines of a clean slice
 MAX_FILES = 100                       # above this many files, count the PR totals
 XP_PER_STEP = 25                      # level = 1 + isqrt(xp // XP_PER_STEP)
@@ -162,14 +163,30 @@ def datadir():
     d.mkdir(parents=True, exist_ok=True)
     return d
 
-def read_local(path):
-    """The scoring events of log.jsonl. A kind that is not in the table below, such as trophy, is skipped and scores nothing."""
+def log_records(path):
+    """The JSON objects of log.jsonl. A line that is not UTF-8 JSON, or not an object, is skipped."""
     out = []
-    for ln in path.read_text(encoding="utf-8").splitlines() if path.exists() else []:
+    for ln in path.read_text(encoding="utf-8", errors="replace").splitlines() if path.exists() else []:
         try:
             r = json.loads(ln)
-            xp = {"card": XP_CARD, "check": XP_CHECK_POINT * int(r.get("score", 0)), "off": 0}[r["kind"]]
+        except ValueError:
+            continue
+        if isinstance(r, dict):
+            out.append(r)
+    return out
+
+def read_local(path):
+    """The scoring events of log.jsonl. A kind that is not in the table below, such as trophy, is skipped and scores nothing.
+    A chapter scores one time for each (campaign, chapter) pair, as `chapter_paid` reads it."""
+    out, paid = [], set()
+    for r in log_records(path):
+        try:
+            pair = (r["campaign"], r["chapter"]) if r["kind"] == "chapter" else None
+            if pair and (pair in paid or not all(isinstance(x, str) for x in pair)):
+                continue
+            xp = {"card": XP_CARD, "check": XP_CHECK_POINT * int(r.get("score", 0)), "off": 0, "chapter": XP_CHAPTER}[r["kind"]]
             out.append(dict(r, days=[date.fromisoformat(r["date"])], xp=xp))
+            paid.add(pair)
         except (ValueError, KeyError, TypeError, AttributeError):
             continue
     return out
@@ -331,12 +348,15 @@ def plan_errors(plan, jira, path):
     if not (isinstance(plan, dict) and isinstance(plan.get("chapters"), list) and plan["chapters"] and isinstance(plan.get("traps", []), list)):
         return [p + 'expected {"epic": ..., "chapters": [{"name": ..., "issues": [...]}], "traps": [{"area": ..., "risk": ...}]}']
     errs = [p + f"epic is {plan.get('epic')!r}, not {jira['epic']!r}"] if plan.get("epic") != jira["epic"] else []
-    known, seen = {i["key"] for i in jira["issues"]}, {}
+    known, seen, names = {i["key"] for i in jira["issues"]}, {}, {}
     for n, c in enumerate(plan["chapters"], 1):
         c = c if isinstance(c, dict) else {}
         if bad(c.get("name")) or not (isinstance(c.get("issues"), list) and c["issues"]):
             errs.append(p + f"chapter {n} needs a name and a list of issues")
             continue
+        if c["name"] in names:                                     # a chapter pays XP by its name, so a name is used one time
+            errs.append(p + f"chapter {n} has the same name as chapter {names[c['name']]}")
+        names.setdefault(c["name"], n)
         for k in c["issues"]:
             if not isinstance(k, str) or k not in known:
                 errs.append(p + f"chapter {n} names {clean(k)}, which is not an issue of the epic")
@@ -364,8 +384,24 @@ def chapter_todo(chapter, iss):
     """The issues of a chapter that are not done. A chapter with none is done."""
     return [k for k in chapter["issues"] if iss[k]["status"] != "done"]
 
-def campaign_report(jira, cached, plan, prs, today):
-    """The campaign report as lines. `plan` is None for no plan. `prs` holds the key set of each merged PR of the season."""
+def chapters_closed(plan, iss, prs):
+    """The raw names of the chapters that are done and that one of your merged PRs links to. `prs` holds the key set of each PR."""
+    return [c["name"] for c in plan["chapters"] if not chapter_todo(c, iss) and any(set(c["issues"]) & x for x in prs)]
+
+def chapter_paid(path, epic):
+    """{raw chapter name: date} for the chapter events of one campaign in log.jsonl, from all seasons."""
+    paid = {}
+    for r in log_records(path):
+        try:
+            if r["kind"] == "chapter" and r["campaign"] == epic and isinstance(r["chapter"], str):
+                paid.setdefault(r["chapter"], date.fromisoformat(r["date"]).isoformat())
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return paid
+
+def campaign_report(jira, cached, plan, prs, today, paid):
+    """The campaign report as lines. `plan` is None for no plan. `prs` holds the key set of each merged PR of the season.
+    `paid` maps the raw name of each chapter that paid XP_CHAPTER to the date of the event."""
     iss = {i["key"]: i for i in jira["issues"]}
 
     def row(k): return f"  {k} {iss[k]['status']}  {iss[k]['summary']}"
@@ -379,7 +415,7 @@ def campaign_report(jira, cached, plan, prs, today):
     for n, (c, name) in enumerate(zip(plan["chapters"], names), 1):
         todo, npr = chapter_todo(c, iss), sum(bool(set(c["issues"]) & x) for x in prs)
         out.append(f"Chapter {n} {name:<{w}}   {'open' if todo else 'done'}  {len(c['issues']) - len(todo)}/{len(c['issues'])} issues"
-                   f"  {npr} PR{'s' * (npr != 1)}")
+                   f"  {npr} PR{'s' * (npr != 1)}" + (f"  +{XP_CHAPTER} XP on {paid[c['name']]}" if c["name"] in paid else ""))
         out += [row(k) for k in todo]
     return out + (["Unplaced"] + [row(k) for k in iss if k not in placed] if set(iss) - placed else [])
 
@@ -407,9 +443,8 @@ def status_campaign(old):
 def bestiary(path, epic):
     """['Bestiary: mimic 2, zombie 1'] for the trophies of one campaign in log.jsonl, in checklist order. [] with none."""
     n = Counter()
-    for ln in path.read_text(encoding="utf-8").splitlines() if path.exists() else []:
+    for r in log_records(path):
         try:
-            r = json.loads(ln)
             if r["kind"] == "trophy" and r.get("campaign") == epic:
                 n[r["monster"]] += 1
         except (ValueError, KeyError, TypeError, AttributeError):
@@ -475,8 +510,19 @@ def cmd_campaign(a):
     prs = [pr_keys(e["title"], e["branch"], known) for e in collect(whoami(), s0) if e["kind"] == "merged" and ev_in(e, s0, today)]
     if errs:
         print("\n".join(errs), file=sys.stderr)
-    print("\n".join(campaign_report(jira, cached, None if errs else plan, prs, today) + bestiary(datadir() / "log.jsonl", epic)))
+    plan, lp = None if errs else plan, datadir() / "log.jsonl"
+    paid = chapter_paid(lp, epic)
+    for name in chapters_closed(plan, {i["key"]: i for i in jira["issues"]}, prs) if plan else []:     # a cached read pays too
+        if name not in paid:
+            log_append(dict(kind="chapter", date=today.isoformat(), campaign=epic, chapter=name))
+            paid[name] = today.isoformat()
+    print("\n".join(campaign_report(jira, cached, plan, prs, today, paid) + bestiary(lp, epic)))
     sys.exit(1 if errs else 0)
+
+def log_append(rec):
+    """Add one record to log.jsonl. A field that is None is left out."""
+    with open(datadir() / "log.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps({k: v for k, v in rec.items() if v is not None}) + "\n")
 
 def cmd_log(a):
     today = date.today()
@@ -505,8 +551,7 @@ def cmd_log(a):
         rec.update(score=a.score, of=a.of, own=a.own or None)
     if a.kind == "trophy":
         rec = dict(kind="trophy", date=d.isoformat(), monster=monster, pr=pr, at=f"{at[1]}:{at[2]}", campaign=load_state().get("campaign"))
-    with open(datadir() / "log.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps({k: v for k, v in rec.items() if v is not None}) + "\n")
+    log_append(rec)
     if a.kind == "trophy":
         print(f"Trophy: {monster} at {rec['at']} ({pr})")
         return
@@ -527,7 +572,7 @@ def cmd_status(_):
     mine = sorted(search(f"is:pr is:open author:{who} archived:false", PR + "createdAt"), key=lambda n: n["createdAt"])
     season = [e for e in evs if ev_in(e, s0, today)]
     week = [e for e in season if ev_in(e, today - timedelta(days=today.weekday()), today)]
-    active = {d for e in season if e["kind"] != "off" for d in e["days"] if d <= today}
+    active = {d for e in season if e["kind"] not in ("off", "chapter") for d in e["days"] if d <= today}   # a chapter is not a day of work
     off = {d for e in evs if e["kind"] == "off" for d in e["days"]}
     cur, best = streaks(active, off, s0, today)
     ts, tw = tally(season), tally(week)
@@ -780,15 +825,26 @@ def selftest(_=None):
         assert len(errs) == 1 and msg in errs[0], (msg, errs)
     assert plan_errors([], jira, Path("plan.json"))[0].startswith("plan.json: expected")
     assert "\x1b" not in plan_errors(dict(plan, chapters=[{"name": "X", "issues": ["\x1b]0;x\x07"]}]), jira, Path("plan.json"))[0]
+    assert plan_errors(dict(plan, chapters=[{"name": "X", "issues": ["ABC-2"]}, {"name": "X", "issues": ["ABC-3"]}]), jira, Path("p"))[0] \
+        == "p: chapter 2 has the same name as chapter 1"
     prs = [{"ABC-2"}, {"ABC-2", "ABC-3"}, {"ABC-1", "ABC-4"}, {"ABC-1"}, set()]      # a PR counts once for a chapter
-    assert campaign_report(jira, False, plan, prs, D(2026, 10, 14)) == [
+    assert campaign_report(jira, False, plan, prs, D(2026, 10, 14), {}) == [
         "CAMPAIGN ABC-1 Export the audit log | started 2026-10-01 (day 14) | Jira read 2026-10-14 09:02",
         "Chapter 1 The Gate     done  2/2 issues  2 PRs", "Chapter 2 The Ledger   open  1/2 issues  1 PR",
         "  ABC-5 new  Write the ledger rows", "Unplaced", "  ABC-6 new  Add a CSV header"]
-    r = campaign_report(jira, True, None, prs, D(2026, 10, 14))
+    iss = {i["key"]: i for i in jira["issues"]}
+    assert chapters_closed(plan, iss, prs) == ["The Gate"]                          # done and linked. The Ledger is open, though ABC-4 links
+    assert chapters_closed(plan, iss, [{"ABC-1"}, set()]) == [] == chapters_closed(plan, iss, [{"ABC-4"}])    # done with no PR. Open with a PR
+    assert campaign_report(jira, False, plan, prs, D(2026, 10, 14), {"The Gate": "2026-10-13"})[1:3] == [
+        f"Chapter 1 The Gate     done  2/2 issues  2 PRs  +{XP_CHAPTER} XP on 2026-10-13", "Chapter 2 The Ledger   open  1/2 issues  1 PR"]
+    odd = dict(plan, chapters=[{"name": "A\x1b[31mB", "issues": ["ABC-2"]}])         # the raw name pays and the clean name prints
+    assert chapters_closed(odd, iss, prs) == ["A\x1b[31mB"]
+    assert campaign_report(jira, False, odd, prs, D(2026, 10, 14), {"A\x1b[31mB": "2026-10-13"})[1] == (
+        f"Chapter 1 A[31mB   done  1/1 issues  2 PRs  +{XP_CHAPTER} XP on 2026-10-13")
+    r = campaign_report(jira, True, None, prs, D(2026, 10, 14), {})
     assert r[0].endswith("09:02 (cache)") and r[1] == "No plan yet. Issues:" and r[2] == "  ABC-2 done  Add the gate" and len(r) == 7
     plan["chapters"].append({"name": "The Rest", "issues": ["ABC-6"]})
-    assert "Unplaced" not in campaign_report(jira, False, plan, [], D(2026, 10, 14))
+    assert "Unplaced" not in campaign_report(jira, False, plan, [], D(2026, 10, 14), {})
     line, done = "Campaign ABC-1: ", dict(jira, issues=[dict(i, status="done") for i in jira["issues"]])
     assert campaign_line("ABC-1", None, None, []) == line + "no Jira read yet"
     assert campaign_line("ABC-1", jira, None, []) == campaign_line("ABC-1", jira, plan, ["plan.json: bad"]) == line + "no plan yet"
@@ -827,6 +883,10 @@ def selftest(_=None):
         assert bestiary(lp, "ABC-2") == ["Bestiary: roper 1"] and bestiary(lp, "ABC-3") == []
         log("card", text="x")
         assert [e["kind"] for e in read_local(lp)] == ["card"] and tally(read_local(lp))["xp"] == XP_CARD    # a trophy pays no XP
+        bad, ch = Path(td) / "bad.jsonl", dict(kind="chapter", date="2026-10-13", campaign="ABC-1", chapter="Gate")
+        bad.write_bytes(b"\xff\xfe\n" + (json.dumps(ch) + "\n").encode() * 2 + (json.dumps(dict(ch, chapter=None)) + "\n").encode())
+        assert tally(read_local(bad))["xp"] == XP_CHAPTER and chapter_paid(bad, "ABC-1") == {"Gate": "2026-10-13"}   # no crash, one pay
+        assert bestiary(bad, "ABC-1") == []
     area = "acme/api:db/migrations"
     assert in_area("acme/api", "db/migrations/1.sql", area) and in_area("Acme/API", "db/migrations/x/y.sql", area) and in_area("acme/api", "db/migrations", area)
     assert not any(in_area(r, p, area) for r, p in (("acme/web", "db/migrations/1.sql"), ("acme/api", "db/migrations2/x.sql"),
@@ -869,6 +929,36 @@ def selftest(_=None):
         assert pr_run("web#1")[0] == pr_run("")[0] == 1                                         # a bad ref
         (cdir / "jira.json").unlink()
         assert pr_run("acme/api#12")[0] == 1 and "no saved Jira read of ABC-1" in pr_run("acme/api#12")[2]
+    with tempfile.TemporaryDirectory() as td, unittest.mock.patch.dict(os.environ, {"QUESTLOG_DIR": td}):    # chapter XP, with a fake GitHub
+        os.environ.pop("QUESTLOG_JIRA_URL", None)                                          # no Jira call: the saved read pays too
+        cdir, lp, today = Path(td) / "campaigns" / "ABC-1", Path(td) / "log.jsonl", D.today()
+        cdir.mkdir(parents=True)
+        (cdir / "jira.json").write_text(json.dumps(jira))
+        (Path(td) / "state.json").write_text(json.dumps({"campaign": "ABC-1"}))
+        mine = [dict(kind="merged", days=[today], xp=10, title="Add the gate", branch="abc-2-gate")]
+
+        def fake_cmd(cmd, evs, **kw):                                                      # a command with a fake GitHub: these events, no open PRs
+            with unittest.mock.patch.multiple(sys.modules[__name__], whoami=lambda: "me", collect=lambda who, start: evs,
+                                              search=lambda *a: []), contextlib.redirect_stdout(io.StringIO()) as out, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    cmd(argparse.Namespace(**kw))
+                except SystemExit as e:
+                    return e.code, out.getvalue().splitlines()
+            return 0, out.getvalue().splitlines()
+        assert fake_cmd(cmd_campaign, mine, epic=None, pr=None)[0] == 0 and not lp.exists()    # no plan: nothing is paid
+        (cdir / "plan.json").write_text(json.dumps(dict(plan, epic="ABC-7")))
+        assert fake_cmd(cmd_campaign, mine, epic=None, pr=None)[0] == 1 and not lp.exists()    # a bad plan: nothing is paid
+        (cdir / "plan.json").write_text(json.dumps(plan))
+        (code1, one), (code2, two) = (fake_cmd(cmd_campaign, mine, epic=None, pr=None) for _ in range(2))
+        assert code1 == code2 == 0 and one == two and one[1].endswith(f"  +{XP_CHAPTER} XP on {today}"), one
+        assert "XP on" not in "".join(one[2:])                                             # The Ledger is open
+        assert [json.loads(x)["chapter"] for x in lp.read_text().splitlines()] == ["The Gate"]    # two runs, one event
+        evs = read_local(lp)
+        assert (tally(evs)["xp"], tally(evs)["chapter"]) == (XP_CHAPTER, 1)
+        st, rc = "\n".join(fake_cmd(cmd_status, evs)[1]), "\n".join(fake_cmd(cmd_recap, evs, days=7)[1])
+        assert f"| {XP_CHAPTER} XP |" in st and "Workday streak: 0 (best this season: 0)" in st    # XP counts, the streak does not
+        assert "The Gate" not in rc + chart_html(evs, today) and f"{XP_CHAPTER} XP in this window" in rc    # no game text in the recap
     print("ok")
 
 def main():
