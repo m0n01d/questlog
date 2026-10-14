@@ -424,7 +424,9 @@ def campaign_line(epic, jira, plan, errs):
     head = f"Campaign {epic}: "
     if not jira:
         return head + "no Jira read yet"
-    if not plan or errs:
+    if errs:                                                       # say so, or a second session zero writes over the plan
+        return head + "plan.json has errors. Run: python3 questlog.py campaign"
+    if not plan:
         return head + "no plan yet"
     iss = {i["key"]: i for i in jira["issues"]}
     n = next((k for k, c in enumerate(plan["chapters"], 1) if chapter_todo(c, iss)), 0)
@@ -847,7 +849,8 @@ def selftest(_=None):
     assert "Unplaced" not in campaign_report(jira, False, plan, [], D(2026, 10, 14), {})
     line, done = "Campaign ABC-1: ", dict(jira, issues=[dict(i, status="done") for i in jira["issues"]])
     assert campaign_line("ABC-1", None, None, []) == line + "no Jira read yet"
-    assert campaign_line("ABC-1", jira, None, []) == campaign_line("ABC-1", jira, plan, ["plan.json: bad"]) == line + "no plan yet"
+    assert campaign_line("ABC-1", jira, None, []) == line + "no plan yet"
+    assert campaign_line("ABC-1", jira, plan, ["plan.json: bad"]) == line + "plan.json has errors. Run: python3 questlog.py campaign"
     assert campaign_line("ABC-1", jira, plan, []) == line + "chapter 2 of 3" and campaign_line("ABC-1", done, plan, []) == line + "complete"
     with tempfile.TemporaryDirectory() as td:                                              # plan_load: none, broken, good
         pp = Path(td) / "plan.json"
