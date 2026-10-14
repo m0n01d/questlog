@@ -318,6 +318,75 @@ def jira_load(path, epic, base, auth, get=http_get):
     path.write_text(json.dumps(data, indent=1), encoding="utf-8")
     return data, False
 
+def plan_errors(plan, jira, path):
+    """Error strings for a plan.json, each starting with the file path. An empty list means the plan is good."""
+    p = f"{path}: "
+
+    def bad(v): return not (isinstance(v, str) and v.strip())
+    if not (isinstance(plan, dict) and isinstance(plan.get("chapters"), list) and plan["chapters"] and isinstance(plan.get("traps", []), list)):
+        return [p + 'expected {"epic": ..., "chapters": [{"name": ..., "issues": [...]}], "traps": [{"area": ..., "risk": ...}]}']
+    errs = [p + f"epic is {plan.get('epic')!r}, not {jira['epic']!r}"] if plan.get("epic") != jira["epic"] else []
+    known, seen = {i["key"] for i in jira["issues"]}, {}
+    for n, c in enumerate(plan["chapters"], 1):
+        c = c if isinstance(c, dict) else {}
+        if bad(c.get("name")) or not (isinstance(c.get("issues"), list) and c["issues"]):
+            errs.append(p + f"chapter {n} needs a name and a list of issues")
+            continue
+        for k in c["issues"]:
+            if not isinstance(k, str) or k not in known:
+                errs.append(p + f"chapter {n} names {k}, which is not an issue of the epic")
+            elif k in seen:
+                errs.append(p + f"{k} is in chapters {seen[k]} and {n}")
+            else:
+                seen[k] = n
+    for n, t in enumerate(plan.get("traps", []), 1):
+        t = t if isinstance(t, dict) else {}
+        if bad(t.get("area")) or bad(t.get("risk")):
+            errs.append(p + f"trap {n} needs an area and a risk")
+    return errs
+
+def campaign_report(jira, cached, plan, prs, today):
+    """The campaign report as lines. `plan` is None for no plan. `prs` holds the key set of each merged PR of the season."""
+    iss = {i["key"]: i for i in jira["issues"]}
+
+    def row(k): return f"  {k} {iss[k]['status']}  {iss[k]['summary']}"
+    day = (today - date.fromisoformat(jira["started"])).days + 1
+    out = [f"CAMPAIGN {jira['epic']} {jira['summary']} | started {jira['started']} (day {day}) | Jira read {jira['read_at']}"
+           + (" (cache)" if cached else "")]
+    if not plan:
+        return out + ["No plan yet. Issues:"] + [row(k) for k in iss]
+    names = [clean(c["name"]) for c in plan["chapters"]]
+    w, placed = max(map(len, names)), {k for c in plan["chapters"] for k in c["issues"]}
+    for n, (c, name) in enumerate(zip(plan["chapters"], names), 1):
+        todo, npr = [k for k in c["issues"] if iss[k]["status"] != "done"], sum(bool(set(c["issues"]) & x) for x in prs)
+        out.append(f"Chapter {n} {name:<{w}}   {'open' if todo else 'done'}  {len(c['issues']) - len(todo)}/{len(c['issues'])} issues"
+                   f"  {npr} PR{'s' * (npr != 1)}")
+        out += [row(k) for k in todo]
+    return out + (["Unplaced"] + [row(k) for k in iss if k not in placed] if set(iss) - placed else [])
+
+def cmd_campaign(a):
+    today, st = date.today(), load_state()
+    if not (a.epic or st.get("campaign")):
+        die("there is no active campaign. Run: python3 questlog.py campaign ABC-1")
+    epic = epic_key(a.epic or st["campaign"])
+    cdir, base = datadir() / "campaigns" / epic, jira_base(os.environ.get("QUESTLOG_JIRA_URL"))
+    jira, cached = jira_load(cdir / "jira.json", epic, base, jira_auth() if base else None)
+    if a.epic:
+        (datadir() / "state.json").write_text(json.dumps({**st, "campaign": epic}))
+    plan, errs, pp = None, [], cdir / "plan.json"
+    if pp.exists():
+        try:
+            plan = json.loads(pp.read_text(encoding="utf-8"))
+            errs = plan_errors(plan, jira, pp)
+        except (OSError, ValueError) as e:
+            errs = [f"{pp}: cannot read the file ({e})"]
+    s0, known = season_bounds(today)[0], {i["key"] for i in jira["issues"]} | {epic}
+    prs = [pr_keys(e["title"], e["branch"], known) for e in collect(whoami(), s0) if e["kind"] == "merged" and ev_in(e, s0, today)]
+    if errs:
+        print("\n".join(errs), file=sys.stderr)
+    print("\n".join(campaign_report(jira, cached, None if errs else plan, prs, today)))
+    sys.exit(1 if errs else 0)
+
 def cmd_log(a):
     today = date.today()
     try:
@@ -362,14 +431,14 @@ def cmd_status(_):
     cur, best = streaks(active, off, s0, today)
     ts, tw = tally(season), tally(week)
     ts["best"] = best
-    xp, lv, st = ts["xp"], level(ts["xp"]), load_state()
-    st = st if st.get("season") == label else {}      # a new season starts from zero
+    xp, lv, old = ts["xp"], level(ts["xp"]), load_state()
+    st = old if old.get("season") == label else {}    # a new season starts from zero
     have = set(st.get("unlocked", []))
     new = [n for n, k, g in ACHIEVEMENTS if ts[k] >= g and n not in have]
     out = [f"LEVEL UP: level {st.get('level', 1)} -> {lv}, {title(lv)}"] if lv > st.get("level", 1) else []
     out += [f"UNLOCKED: {n}" for n in new]
     have.update(new)
-    (datadir() / "state.json").write_text(json.dumps({"season": label, "level": lv, "unlocked": sorted(have)}))
+    (datadir() / "state.json").write_text(json.dumps({**old, "season": label, "level": lv, "unlocked": sorted(have)}))
 
     def cells(t):
         return [f"{t['merged']} ({t['clean']} clean, {t['tested']} tested, owned {t['owned']})",
@@ -586,6 +655,37 @@ def selftest(_=None):
             assert jira_load(path, "ABC-1", "", None)[1] and "QUESTLOG_JIRA_URL" in err.getvalue()
         assert dies(jira_load, path, "ABC-1", "https://acme.example", None, no_epic)             # the saved copy stays
         assert jira_cache(path, "ABC-1")["started"] == "2026-09-01" and jira_cache(path, "ABC-2") is None
+
+    jira = {"epic": "ABC-1", "summary": "Export the audit log", "started": "2026-10-01", "read_at": "2026-10-14 09:02",
+            "issues": [{"key": f"ABC-{n}", "summary": t, "status": st} for n, t, st in (
+                (2, "Add the gate", "done"), (3, "Test the gate", "done"), (4, "Design the ledger", "done"),
+                (5, "Write the ledger rows", "new"), (6, "Add a CSV header", "new"))]}
+    plan = {"epic": "ABC-1", "chapters": [{"name": "The Gate", "issues": ["ABC-2", "ABC-3"]},
+                                          {"name": "The Ledger", "issues": ["ABC-4", "ABC-5"]}],
+            "traps": [{"area": "acme/api:db/migrations", "risk": "migration"}]}
+    assert plan_errors(plan, jira, Path("plan.json")) == []
+    chap = plan["chapters"]
+    for change, msg in ((dict(chapters=chap + [{"name": "X", "issues": ["ABC-9"]}]), "plan.json: chapter 3 names ABC-9, which"),
+                        (dict(chapters=chap + [{"name": "X", "issues": ["ABC-2"]}]), "plan.json: ABC-2 is in chapters 1 and 3"),
+                        (dict(chapters=[{"name": "X", "issues": ["ABC-1"]}]), "names ABC-1"),         # the epic is not a child
+                        (dict(epic="ABC-7"), "plan.json: epic is 'ABC-7', not 'ABC-1'"),
+                        (dict(chapters=chap + [{"name": " ", "issues": ["ABC-6"]}]), "chapter 3 needs a name"),
+                        (dict(chapters=chap + [{"name": "X", "issues": []}]), "chapter 3 needs a name and a list"),
+                        (dict(chapters=chap + [{"name": "X", "issues": [["ABC-6"]]}]), "chapter 3 names ['ABC-6']"),
+                        (dict(traps=[{"area": "acme/api"}]), "plan.json: trap 1 needs an area and a risk"),
+                        (dict(chapters=[]), "plan.json: expected"), (dict(chapters="x"), "plan.json: expected"), (dict(traps={}), "expected")):
+        errs = plan_errors(dict(plan, **change), jira, Path("plan.json"))
+        assert len(errs) == 1 and msg in errs[0], (msg, errs)
+    assert plan_errors([], jira, Path("plan.json"))[0].startswith("plan.json: expected")
+    prs = [{"ABC-2"}, {"ABC-2", "ABC-3"}, {"ABC-1", "ABC-4"}, {"ABC-1"}, set()]      # a PR counts once for a chapter
+    assert campaign_report(jira, False, plan, prs, D(2026, 10, 14)) == [
+        "CAMPAIGN ABC-1 Export the audit log | started 2026-10-01 (day 14) | Jira read 2026-10-14 09:02",
+        "Chapter 1 The Gate     done  2/2 issues  2 PRs", "Chapter 2 The Ledger   open  1/2 issues  1 PR",
+        "  ABC-5 new  Write the ledger rows", "Unplaced", "  ABC-6 new  Add a CSV header"]
+    r = campaign_report(jira, True, None, prs, D(2026, 10, 14))
+    assert r[0].endswith("09:02 (cache)") and r[1] == "No plan yet. Issues:" and r[2] == "  ABC-2 done  Add the gate" and len(r) == 7
+    plan["chapters"].append({"name": "The Rest", "issues": ["ABC-6"]})
+    assert "Unplaced" not in campaign_report(jira, False, plan, [], D(2026, 10, 14))
     print("ok")
 
 def main():
@@ -599,6 +699,8 @@ def main():
     c = sub.add_parser("chart", help="write chart.html: heatmap, cumulative XP and weekly bars")
     c.add_argument("--demo", action="store_true", help="draw a made-up season. Reads no GitHub data and no log")
     c.add_argument("--no-open", action="store_true", help="write the file and do not open it")
+    cp = sub.add_parser("campaign", help="read a Jira epic, link your PRs and print the campaign report")
+    cp.add_argument("epic", nargs="?", help="epic key such as ABC-1. It becomes the active campaign")
     lg = sub.add_parser("log", help="log a card, a check or an off day")
     lg.add_argument("kind", choices=["card", "check", "off"])
     lg.add_argument("--pr", help="owner/repo#n")
@@ -608,7 +710,7 @@ def main():
     lg.add_argument("--text")
     lg.add_argument("--own", action="store_true", help="the check is for your own PR")
     a = ap.parse_args()
-    {"status": cmd_status, "recap": cmd_recap, "chart": cmd_chart, "log": cmd_log, "selftest": selftest,
+    {"status": cmd_status, "recap": cmd_recap, "chart": cmd_chart, "campaign": cmd_campaign, "log": cmd_log, "selftest": selftest,
      "dir": lambda _: print(datadir())}[a.cmd](a)
 
 if __name__ == "__main__":
