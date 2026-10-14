@@ -233,7 +233,7 @@ This work includes material from the System Reference Document 5.2.1 (“SRD 5.2
 ## Data and privacy
 
 - The script keeps its data in `~/.claude/questlog/`. Set `QUESTLOG_DIR` to use another folder.
-- `log.jsonl` holds your cards, checks, trophies and off days. `state.json` holds the season, the level, the unlocked achievements and the active campaign.
+- `log.jsonl` holds your cards, checks, trophies, closed chapters and off days. `state.json` holds the season, the level, the unlocked achievements and the active campaign.
 - `rubric.md` holds the expected answers of the last review. The next review overwrites it.
 - `chart.html` holds the last chart.
 - `campaigns/<EPIC>/jira.json` holds the last Jira read: the epic summary, and the key, summary and status category of each child issue.
